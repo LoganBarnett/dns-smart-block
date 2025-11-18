@@ -652,7 +652,7 @@ Output:
 
 #+end_example
 
-#+begin_src sh :results output :exports code :noweb yes
+#+begin_src sh :results output :exports both :noweb yes
 full_prompt="$(cat <<'EOF'
 <<prompt()>>
 EOF
