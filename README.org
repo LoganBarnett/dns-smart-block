@@ -652,6 +652,8 @@ Output:
 
 #+end_example
 
+And finally the test:
+
 #+begin_src sh :results output :exports both :noweb yes
 full_prompt="$(cat <<'EOF'
 <<prompt()>>
