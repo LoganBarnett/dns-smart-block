@@ -38,11 +38,11 @@ servers simultaneously.  At time of writing, we are targeting ~dnsdist~ and
 For this to work, we need ~dnsdist~ to sit in front of the DNS chain.
 
 DNS Smart Block comes with a ~dns-smart-block-worker~ and a
-~dns-smart-block-aggregator~.  The worker consumes a queue to do the hard work
-on determining if a domain belongs to an interested category.  The aggregator
+~dns-smart-block-log-processor~.  The worker consumes a queue to do the hard work
+on determining if a domain belongs to an interested category.  The log processor
 takes domains from a source and loads them onto a queue.  As a concrete example,
-the aggregator could watch logs from ~dnsdist~ and when an unknown domain is
-allowed, the aggregator puts that domain on the queue.
+the log processor could watch logs from ~dnsdist~ and when an unknown domain is
+allowed, the log processor puts that domain on the queue.
 
 So the DNS request and queue flow looks like this:
 
@@ -149,7 +149,7 @@ for broken rendering, and it's extra apparent when nodes are parallel.
 
 Make a minimal reproduction before filing.
 
-** TODO [#C] Implement two Rust projects:  An aggregator and a worker
+** TODO [#C] Implement two Rust projects: A log-processor and a worker
 
 This is mostly just cargo gymnastics.  But any build machinery we produce should
 also be aware of this.  There might also be merit in a shared library.
