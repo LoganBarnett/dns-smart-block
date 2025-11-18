@@ -1,0 +1,385 @@
+#+title:     Vibe Coding
+#+author:    Logan Barnett
+#+email:     logustus@gmail.com
+#+date:      <2025-11-17 Mon>
+#+language:  en
+#+file_tags:
+#+tags:
+
+* Dynamic DNS Categorization + Blocking Pipeline
+:PROPERTIES:
+:Audience: Claude Code (Sonnet 4.5) / code-first implementer
+:Style: Self-hosted, NixOS, long flags, root cmds prefixed with “#”
+:END:
+
+This document is rather noisy but is intended for LLMs in order to facilitate
+vibe coding.  If a piece of documentation seems both worthy of both human and
+LLM audiences, promote said documentation to either the README or some
+derivative document.
+
+~dnsdist~ → Blocky → Rust worker → Ollama → Git
+
+** Goal
+
+Create a dynamic system that:
+1. Lets ~dnsdist~ block immediately (mutable, no Blocky restart).
+2. Keeps Blocky lists up-to-date so restarts preserve the same end-state.
+3. Classifies new, allowed domains via a Rust worker + Ollama LLM, and commits
+   blocks to a public Git repo (commit message includes confidence).
+
+** High-level flow
+
+#+BEGIN_SRC text
+Client → dnsdist → Blocky → (resolve)
+↘ query log (allowed only) → NATS queue → Rust worker
+↘ HEAD fetch → metadata+excerpt
+→ Ollama classify (gaming? etc.)
+→ if hit:
+- git commit/push domain to category list (msg includes confidence)
+- ~dnsdist~ addDomainBlock(domain) (instant)
+- Blocky consumes list on next restart (consistency)
+#+END_SRC
+
+** Signals and truth
+
++ Immediate enforcement :: ~dnsdist~ in-memory block rules.
++ Authoritative lists :: Git repo (e.g., lists/gaming.txt, lists/allow.txt).
++ Discovery feed :: Blocky query log (only unblocked traffic reaches Blocky,
+  perfect for “served once → evaluate”).
+
+** NixOS services (minimal baseline)
+#+BEGIN_SRC nix
+{ config, pkgs, lib, ... }: let
+  # choose your queue: NATS is simple + fast + OSS
+  natsPort = 4222;
+in {
+  ######## ~dnsdist~ (front, mutable blocks)
+  services.dnsdist = {
+    enable = true;
+    extraConfig = ''
+      setLocal("0.0.0.0:53") -- listen on :53
+      newServer({ address="127.0.0.1:5300" }) -- Blocky upstream
+      -- in-memory block rules list (we mutate this live from the worker):
+      -- control socket for programmatic updates
+      controlSocket("127.0.0.1:5199")
+      setKey("supersecret-long-random-key")  -- use LoadCredential in prod; shown inline for brevity
+      -- sane defaults
+      setCacheSize(200000)
+      setMaxUDPOutstanding(100000)
+      setMaxTCPClientThreads(16)
+    '';
+  };
+  ######## Blocky (authoritative lists + query log for “allowed”)
+  # NOTE: We use CSV log to avoid DB. (Prometheus can still be on.)
+  services.blocky = {
+    enable = true;
+    settings = {
+    # listen on 5300 so ~dnsdist~ can front 53
+    port = 5300; # long-form isn't available; blocky uses 'port' key
+    httpPort = 4000;
+    prometheus = { enable = true; path = "/metrics"; };
+      # lists loaded at startup / restart
+      blockLists = {
+        gaming = [ "https://raw.githubusercontent.com/you/block-lists/refs/heads/main/lists/gaming.txt" ];
+        # add other categories as you like
+      };
+      # optional allowlist you control from the same repo
+      whitelists = {
+        allow = [ "https://raw.githubusercontent.com/you/block-lists/refs/heads/main/lists/allow.txt" ];
+      };
+      queryLog = {
+        type = "csv-client";              # write per-query lines, easy to tail
+        target = "/var/log/blocky/queries.log";
+        logRetentionDays = 7;             # rotate externally if desired
+        fields = [ "clientIP" "clientName" "question" "responseReason" "responseAnswer" "duration" ];
+        flushInterval = "5s";
+      };
+    };
+  };
+  # log directory for blocky
+  systemd.services.blocky.serviceConfig = {
+    RuntimeDirectory = "blocky";
+    LogsDirectory = "blocky";
+  };
+  ######## NATS (queue for domains to classify)
+  services.nats = {
+    enable = true;
+    port = natsPort;
+    # no auth shown; for LAN only; add auth if exposed
+  };
+  ######## Ollama (local LLM)
+  services.ollama = {
+    enable = true;
+    # Pull models manually or via postStart; example models below in worker
+    # config.
+  };
+  ######## Rust worker unit
+  # secrets: use LoadCredential for git deploy key; no builtins.readFile
+  systemd.services.domain-classifier = {
+    description = "DNS domain classifier worker (Rust) → Ollama → ~dnsdist~ → Git";
+    after = [ "nats.service" "ollama.service" "~dnsdist~.service" "blocky.service" ];
+    wants = [ "nats.service" "ollama.service" "~dnsdist~.service" "blocky.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+    ExecStart = ''/var/lib/domain-classifier/bin/domain-classifier
+      --nats-url nats://127.0.0.1:4222
+      --blocky-csv /var/log/blocky/queries.log
+      --ollama-url http://127.0.0.1:11434
+      --ollama-model llama3.1:8b-instruct-q4_K_M
+      --confidence-min 0.85
+      --category gaming
+      --dnsdist-ctl 127.0.0.1:5199
+      --dnsdist-key-file /run/credentials/%N/~dnsdist~-key
+      --git-url git@github.com:you/block-lists.git
+      --git-branch main
+      --git-file lists/gaming.txt
+      --workdir /var/lib/domain-classifier/repo
+      --http-max-kb 200
+      --http-timeout-sec 5
+      --max-inflight 64
+      --allowlist-file /var/lib/domain-classifier/allow.txt
+      --state-db /var/lib/domain-classifier/state.sqlite
+    '';
+    User = "domainc";
+    Group = "domainc";
+    StateDirectory = "domain-classifier";
+    WorkingDirectory = "/var/lib/domain-classifier";
+    LoadCredential = [
+    "dnsdist-key:/run/secrets/dnsdist.key"
+    "git_ssh_key:/run/secrets/git_ssh_key"
+    ];
+    Environment = [
+      # Git over SSH using the credential file.
+      "GIT_SSH_COMMAND=ssh -i /run/credentials/%N/git_ssh_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    ];
+    Restart = "on-failure";
+    RestartSec = "2s";
+    };
+  };
+  users.users.domainc = { isSystemUser = true; group = "domainc"; };
+  users.groups.domainc = { };
+}
+#+END_SRC
+** Worker responsibilities (Rust)
+
+*** Crates (suggested)
+ingest & queue: notify (file watcher) or tailer, natsio (or async-nats)
+HTTP fetch: reqwest with --compressed / gzip
+HTML → text: html2text or scraper (title/meta); optional: readability via readability-cli fallback
+LLM client: simple reqwest POST to Ollama /api/generate
+Git ops: git2 (libgit2) for add/commit/push
+State: rusqlite for dedup, backoff, last-seen timestamps
+DNS control: plain TCP to ~dnsdist~ control socket; send addDomainBlock("example.com") with auth key
+Config: clap long flags; serde for JSON
+
+*** Ingestion (tail Blocky CSV)
+
+Tail /var/log/blocky/queries.log
+Parse line → fields: clientIP, clientName, question, responseReason, responseAnswer, duration
+Filter: enqueue only if
+a) responseReason != "BLOCKED" and
+b) registrable_domain(question) not in local allowlist and
+c) not seen recently (state.sqlite with TTL)
+d)
+
+*** Normalization
+
+Compute registrable domain (PSL). E.g., sub.a.b.example.co.uk → example.co.uk.
+Maintain category files at registrable-domain granularity.
+Optional: path/SNI deep rules belong in ~dnsdist~ later, not DNS layer.
+
+*** Fetch
+
+GET https://{domain}/ with:
+--max-time = --http-timeout-sec
+download only first --http-max-kb KB
+follow redirects (--location)
+headers: User-Agent: SiteClassifier/1.0 (+local)
+Extract:
+title
+meta description, og:title, og:description, og:site_name
+language (<html lang=…>)
+plain text excerpt (first ~4KB) via html2text
+HTTP status and key headers
+
+*** LLM prompt (structured, JSON only)
+
+#+BEGIN_SRC json
+{
+  "role": "system",
+  "content": "You are a strict website classifier. Output compact JSON only."
+}
+#+END_SRC
+#+BEGIN_SRC json
+{
+  "role": "user",
+  "content": [
+    "Task: Decide if this site fits category \"${CATEGORY}\".",
+    "Inputs:",
+    "- Domain: ${DOMAIN}",
+    "- HTTP status: ${STATUS}",
+    "- Title: ${TITLE}",
+    "- Meta: ${META}",
+    "- Snippet: ${TEXT}",
+    "Rules:",
+    "- Base decision on the content above; if insufficient, say not_${CATEGORY}.",
+    "- Avoid guessing from domain name alone.",
+    "- If it's a docs portal/CDN/aggregator or general news, say not_${CATEGORY}.",
+    "Return JSON:\n{\"category\":\"${CATEGORY}|not_${CATEGORY}\",\"confidence\":0.0..1.0,\"why\":\"<short>\"}"
+  ]
+}
+#+END_SRC
+
+*** Ollama call (example)
+
+#+BEGIN_SRC http
+POST /api/generate
+Content-Type: application/json
+{
+  "model": "llama3.1:8b-instruct-q4_K_M",
+  "prompt": "<system+user as above>",
+  "temperature": 0.1,
+  "top_p": 0.9,
+  "stream": false
+}
+#+END_SRC
+
+*** Decision
+
+Parse JSON. If category == CATEGORY and confidence >= --confidence-min:
+~dnsdist~ block now: addDomainBlock("example.com")
+git append to lists/${CATEGORY}.txt if not present
+commit & push with message including confidence
+Template:
+block(${CATEGORY}): example.com (confidence=${CONF}) [worker vX.Y, model=${MODEL}]
+Else: record in state.sqlite with decision + confidence; optionally enqueue for manual review.
+
+*** Git writing rules
+
+Always operate in a clean worktree at --workdir.
+git pull --rebase before write.
+Append example.com\n maintaining sorted unique lines.
+git commit --message "<template>" --author "Domain Worker <bot@local>"
+git push origin ${BRANCH}
+
+*** ~dnsdist~ control (from worker)
+
+TCP connect to ~--dnsdist-ctl~
+Auth with key (from ~--dnsdist-key-file~)
+Send: ~addDomainBlock("example.com")~
+(Also persist to Git so next ~dnsdist~ restart will replay from the lists file
+if you load it there too.)
+** ~dnsdist~ config to import your Git list on restart (consistency)
+#+BEGIN_SRC lua
+-- optional, on start/restart load the persistent list too:
+function loadList(path)
+  for line in io.lines(path) do
+    if line:match("^%s*$") or line:match("^%s*#") then
+      -- skip comments/blank
+    else
+      addDomainBlock(line)
+    end
+  end
+end
+loadList("/var/lib/domain-classifier/repo/lists/gaming.txt")
+#+END_SRC
+
+** Commit message examples (with confidence)
+
+block(gaming): coolgames.com (confidence=0.93) [worker=1.2.0 model=llama3.1:8b q4_K_M]
+block(gaming): riot-platform.com (confidence=0.87) [worker=1.2.0 model=qwen2.5:7b q4]
+
+** CLI (worker) — long flags preferred
+
+#+BEGIN_SRC text
+domain-classifier
+  --nats-url nats://127.0.0.1:4222 # queue server
+  --blocky-csv /var/log/blocky/queries.log # source of allowed queries
+  --ollama-url http://127.0.0.1:11434 # local LLM
+  --ollama-model llama3.1:8b-instruct-q4_K_M # quantized model to use
+  --category gaming # classification target
+  --confidence-min 0.85 # decision threshold
+  --dnsdist-ctl 127.0.0.1:5199 # dnsdist control socket
+  --dnsdist-key-file /run/credentials/domain-classifier/~dnsdist~-key # auth key file
+  --git-url git@github.com:you/block-lists.git # repo
+  --git-branch main # branch
+  --git-file lists/gaming.txt # file to modify
+  --workdir /var/lib/domain-classifier/repo # local checkout
+  --http-timeout-sec 5 # fetch timeout
+  --http-max-kb 200 # cap download size
+  --max-inflight 64 # concurrent workers
+  --allowlist-file /var/lib/domain-classifier/allow.txt # local allowlist
+  --state-db /var/lib/domain-classifier/state.sqlite # dedupe + history
+#+END_SRC
+
+** Root commands you’ll run (examples)
+
+Add a domain manually (immediate):
+#+BEGIN_SRC bash
+dnsdist console (interactive)
+dnsdist -c 127.0.0.1:5199 --secret supersecret-long-random-key
+addDomainBlock("example.com")
+#+END_SRC
+
+Append to repo and push (persistent):
+
+#+BEGIN_SRC bash
+cd /var/lib/domain-classifier/repo && git pull --rebase
+printf "%s\n" "example.com" >> lists/gaming.txt
+git add lists/gaming.txt
+git commit --message "block(gaming): example.com (confidence=1.00) [manual]"
+git push
+#+END_SRC
+
+** Notes on secrets & capabilities
+
+~dnsdist~ key, git SSH key: provided via LoadCredential; no builtins.readFile.
+Blocky: does not support separate secret file in YAML; we avoided DB creds
+entirely by using CSV logs.
+Network binds: only ~dnsdist~ needs :53; Blocky moved to :5300.
+
+** Accuracy expectations
+
+With content excerpt + metadata, 7–8B quantized models on an M1/32 GB are
+typically good for clear categories (gaming/adult/shopping/news).
+Use heuristics (title/meta keywords) to skip LLM on obvious cases and to reduce false positives.
+Re-check periodically (sites change).
+
+** Failure modes & mitigations
+
+LLM hallucination: enforce JSON schema; require confidence ≥ threshold; keep an allowlist.
+Fetch failures: backoff and retry; fall back to domain-only heuristics but do
+not block on low confidence.
+~dnsdist~ restart: it will re-load lists via Lua loader; Blocky restarts don’t
+affect ~dnsdist~’s live blocks.
+Git push races: serialize writes per category file; git pull --rebase before commit.
+
+** Extending beyond one category
+
+Run multiple worker instances with different --category and --git-file.
+Or one worker that routes to category-specific files by multi-label LLM output.
+
+** Minimal Rust skeleton (outline)
+#+BEGIN_SRC rust
+#[derive(clap::Parser)]
+struct Args { /* long flags from CLI section */ }
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+  let args = Args::parse();
+  let mut tail = tail_csv(&args.blocky_csv).await?;
+  let mut pool = WorkerPool::new(args.max_inflight);
+  while let Some(evt) = tail.next().await {
+    if !evt.allowed() { continue; }
+    let d = registrable_domain(evt.question)?;
+    if is_allowed(&d, &args.allowlist_file)? || seen_recently(&db, &d)? { continue; }
+    pool.spawn(classify_and_enforce(d, &args)).await?;
+  }
+  Ok(())
+}
+#+END_SRC
+
+** Done
+
+This design gives you instant, mutable blocks via ~dnsdist~, durable state via
+Git-based lists (with confidence in commit messages), and a fully self-hosted
+LLM classification pipeline that scales on your M1.
