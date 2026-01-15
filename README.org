@@ -46,7 +46,7 @@ allowed, the log processor puts that domain on the queue.
 
 So the DNS request and queue flow looks like this:
 
-#+begin_src d2 :results verbatim
+#+begin_src d2 :results verbatim :exports results
 initial_query: "DNS client sends query"
 dnsdist_handle: "dnsdist handles request"
 
