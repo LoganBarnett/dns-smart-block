@@ -3,6 +3,10 @@ name = "dns-smart-block-worker"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "dns_smart_block_worker"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "*", features = ["derive", "env"] }
 reqwest = { version = "*", features = ["json", "gzip"] }
@@ -13,3 +17,7 @@ tokio = { version = "*", features = ["full"] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 thiserror = "*"
+
+[dev-dependencies]
+wiremock = "0.5"
+tokio-test = "*"
