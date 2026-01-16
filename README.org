@@ -12,37 +12,25 @@ something that can get ahead of human submission of domains to block.
 
 * Overview
 
-DNS Smart Block is a queue worker that picks up domains from a queue, performs
-an HTTP GET (following redirects), as well as a ~whois~, and feeds all of that
-to an LLM to ask it if the domain fits various categories you are interested in
-blocking.
+DNS Smart Block is an orchestration system for smart DNS blocking using LLMs.
+The system watches DNS logs, queues domain lookups, fetches content from those
+domains, and uses an LLM to classify whether they match categories you're
+interested in blocking.
 
-DNS Smart Block is intended to be used in conjunction with two different DNS
-servers simultaneously.  At time of writing, we are targeting ~dnsdist~ and
-~Blocky~, but we wish to remain agnostic if at all possible.
+The system uses ~dnsdist~ as the DNS server.  ~dnsdist~ is a dynamic DNS server
+that allows adding blocked domains via API without restarts or reloads.  This
+makes it ideal for real-time, LLM-driven blocking decisions.
 
-1. ~dnsdist~ is the dynamic DNS server.  We need a dynamic system where we can
-   add blocked domains without needing restarts or reloads (which could be
-   lengthy when one has millions of domains blocked - thanks world-of-ads).
-   ~dnsdist~ fits this bill perfectly.  ~dnsdist~ should defer to the static DNS
-   server for DNS requests it cannot directly fulfill (which will be just about
-   everything).
-2. ~Blocky~ is the static DNS server.  If ~dnsdist~ were to be restarted, we'd
-   lose all of the in-memory additions we wrote to it.  We need this to be
-   durable, so we need a static DNS server that reads from a file.  The
-   expectation is that this file will reside in Git somewhere, and we will
-   update the text file of blocked domains and push commits with updates to said
-   file.  Then if the DNS system requires a restart, ~Blocky~ will pick up all
-   of our updates.
+DNS Smart Block consists of two main components:
 
-For this to work, we need ~dnsdist~ to sit in front of the DNS chain.
+1. *Log Processor* - Watches ~dnsdist~ logs and enqueues domains that appear in
+   DNS requests.  When a DNS lookup occurs, it's written to the log, and the log
+   processor adds it to the work queue.
 
-DNS Smart Block comes with a ~dns-smart-block-worker~ and a
-~dns-smart-block-log-processor~.  The worker consumes a queue to do the hard work
-on determining if a domain belongs to an interested category.  The log processor
-takes domains from a source and loads them onto a queue.  As a concrete example,
-the log processor could watch logs from ~dnsdist~ and when an unknown domain is
-allowed, the log processor puts that domain on the queue.
+2. *Worker* - Consumes domains from the queue, fetches data from each domain
+   (HTTP GET with redirect following), and feeds the content to an LLM.  The LLM
+   classifies the site based on your interested categories.  If the site
+   matches, the worker updates ~dnsdist~'s block list via its API.
 
 So the DNS request and queue flow looks like this:
 
@@ -54,80 +42,70 @@ direction: down
 
 parallel_flows: {
   grid-gap: 4
-  # style.padding: 1
-  dnsdist_to_blocky: "dnsdist forwards to blocky"
-  blocky_to_external: "blocky forwards to ext."
+  dnsdist_to_upstream: "dnsdist forwards to upstream"
 
   dnsdist_log: "dnsdist logs request"
-  aggregate: "agg. enqueues domain"
-  worker_whois: "worker does whois"
+  log_processor: "log processor enqueues domain"
   worker_http: "worker fetches HTTP"
-  worker_dnsdist_match: "worker updates dnsdist"
-  worker_blocky_match: "worker updates blocky list"
-  dnsdist_to_blocky --> blocky_to_external
-  dnsdist_log -> aggregate -> worker_whois -> worker_http
-  worker_http -> worker_dnsdist_match -> worker_blocky_match
+  worker_llm: "worker queries LLM"
+  worker_dnsdist_update: "worker updates dnsdist"
+
+  dnsdist_log -> log_processor -> worker_http -> worker_llm -> worker_dnsdist_update
 }
 
 initial_query --> dnsdist_handle
-dnsdist_handle -> parallel_flows.dnsdist_to_blocky
+dnsdist_handle -> parallel_flows.dnsdist_to_upstream
 dnsdist_handle -> parallel_flows.dnsdist_log
 #+end_src
 
 #+RESULTS:
 #+begin_example
-                    ┌───────────────────────┐
-                    │DNS client sends query │
-                    │                       │
-                    └───────────────────────┘
-                              │
-                              ▼
-                   ┌────────────────────────┐
-                   │dnsdist handles request │
-                   │                        │
-                   └────────────────────────┘
-                           │      │
-                           │      └───────┐
-                           │              │
- ┌─────────────────────────│──────────────│────────────────┐
- │                     parallel_flows     │                │
- │                         ▼              ▼                │
- │    ┌─────────────────────────┌─────────────────────┐    │
- │    │dnsdist forwards to block│dnsdist logs request │    │
- │    │                         │ │                   │    │
- │    └─────────────────────────└─────────────────────┘    │
- │                │                       │                │
- │                ▼                       ▼                │
- │      ┌───────────────────────┌─────────────────────┐    │
- │      │blocky forwards to ext.│agg. enqueues domain │    │
- │      │                       ││                    │    │
- │      └───────────────────────└─────────────────────┘    │
- │                                        │                │
- │                                        ▼                │
- │                               ┌──────────────────┐      │
- │                               │worker does whois │      │
- │                               │                  │      │
- │                               └──────────────────┘      │
- │                                        │                │
- │                                        ▼                │
- │                              ┌────────────────────┐     │
- │                              │worker fetches HTTP │     │
- │                              │                    │     │
- │                              └────────────────────┘     │
- │                                        │                │
- │                                        ▼                │
- │                             ┌───────────────────────┐   │
- │                             │worker updates dnsdist │   │
- │                             │                       │   │
- │                             └───────────────────────┘   │
- │                                        │                │
- │                                        ▼                │
- │                            ┌───────────────────────────┐│
- │                            │worker updates blocky list ││
- │                            │                           ││
- │                            └───────────────────────────┘│
- │                                                         │
- └─────────────────────────────────────────────────────────┘
+                     ┌───────────────────────┐
+                     │DNS client sends query │
+                     │                       │
+                     └───────────────────────┘
+                                │
+                                ▼
+                     ┌────────────────────────┐
+                     │dnsdist handles request │
+                     │                        │
+                     └────────────────────────┘
+                            │      │
+                            │      └────────┐
+                            │               │
+ ┌──────────────────────────│───────────────│──────────────────┐
+ │                       parallel_flows     │                  │
+ │                          ▼               ▼                  │
+ │    ┌───────────────────────────┌─────────────────────┐      │
+ │    │dnsdist forwards to upstrea│dnsdist logs request │      │
+ │    │                           │ │                   │      │
+ │    └───────────────────────────└─────────────────────┘      │
+ │                                          │                  │
+ │                                          ▼                  │
+ │                            ┌──────────────────────────────┐ │
+ │                            │log processor enqueues domain │ │
+ │                            │                              │ │
+ │                            └──────────────────────────────┘ │
+ │                                          │                  │
+ │                                          ▼                  │
+ │                                ┌────────────────────┐       │
+ │                                │worker fetches HTTP │       │
+ │                                │                    │       │
+ │                                └────────────────────┘       │
+ │                                          │                  │
+ │                                          ▼                  │
+ │                                 ┌───────────────────┐       │
+ │                                 │worker queries LLM │       │
+ │                                 │                   │       │
+ │                                 └───────────────────┘       │
+ │                                          │                  │
+ │                                          ▼                  │
+ │                               ┌───────────────────────┐     │
+ │                               │worker updates dnsdist │     │
+ │                               │                       │     │
+ │                               └───────────────────────┘     │
+ │                                                             │
+ └─────────────────────────────────────────────────────────────┘
 #+end_example
 
 
@@ -163,8 +141,8 @@ configurations.  The fortunate thing about a NixOS setup is that it lays all of
 the chips on the table, so while it won't be executable for those not using
 NixOS, it will be explicit enough that anyone can duplicate it.
 
-The ideal setup consists of NATS for the queue, ~dnsdist~ for the mutable DNS
-server, and Blocky for the immutable DNS server.
+The ideal setup consists of NATS for the queue and ~dnsdist~ for the DNS
+server.
 
 ** TODO [#B] Lay out project structure for worker
 
@@ -178,7 +156,6 @@ nothing useful is published to them.
 ** TODO [#B] Worker does GET, follows redirect, extracts meta + text
 ** TODO [#B] Worker sends result to LLM
 ** TODO [#B] Worker sends block to ~dnsdist~
-** TODO [#B] Worker sends block to ~Blocky~
 ** TODO [#A] Manually test block via ~dnsdist~ API call
 ** KILL [#A] Manually test ~whois~
 CLOSED: [2025-11-17 Mon 18:34]
@@ -222,7 +199,7 @@ For more information on Whois status codes, please visit https://icann.org/epp
 
 NOTICE: The expiration date displayed in this record is the date the
 registrar's sponsorship of the domain name registration in the registry is
-currently set to expire. This date does not necessarily reflect the expiration
+currently set to expire.  This date does not necessarily reflect the expiration
 date of the domain name registrant's agreement with the sponsoring
 registrar.  Users may consult the sponsoring registrar's Whois database to
 view the registrar's reported date of expiration for this registration.
@@ -233,22 +210,22 @@ automated except as reasonably necessary to register domain names or
 modify existing registrations; the Data in VeriSign Global Registry
 Services' ("VeriSign") Whois database is provided by VeriSign for
 information purposes only, and to assist persons in obtaining information
-about or related to a domain name registration record. VeriSign does not
-guarantee its accuracy. By submitting a Whois query, you agree to abide
+about or related to a domain name registration record.  VeriSign does not
+guarantee its accuracy.  By submitting a Whois query, you agree to abide
 by the following terms of use: You agree that you may use this Data only
 for lawful purposes and that under no circumstances will you use this Data
 to: (1) allow, enable, or otherwise support the transmission of mass
 unsolicited, commercial advertising or solicitations via e-mail, telephone,
 or facsimile; or (2) enable high volume, automated, electronic processes
-that apply to VeriSign (or its computer systems). The compilation,
+that apply to VeriSign (or its computer systems).  The compilation,
 repackaging, dissemination or other use of this Data is expressly
-prohibited without the prior written consent of VeriSign. You agree not to
+prohibited without the prior written consent of VeriSign.  You agree not to
 use electronic processes that are automated and high-volume to access or
 query the Whois database except as reasonably necessary to register
-domain names or modify existing registrations. VeriSign reserves the right
+domain names or modify existing registrations.  VeriSign reserves the right
 to restrict your access to the Whois database in its sole discretion to ensure
 operational stability.  VeriSign may restrict or terminate your access to the
-Whois database for failure to abide by these terms of use. VeriSign
+Whois database for failure to abide by these terms of use.  VeriSign
 reserves the right to modify these terms at any time.
 
 The Registry database contains ONLY .COM, .NET, .EDU domains and
@@ -333,30 +310,30 @@ about games, a platform for playing games, a platform that could be used to play
 games, a place in which game discussions occur, game news sites, and so on.
 
 We want a few domains that represent:
-1. Sites that are obviously gaming sites under this criteria.
-2. Sites that are dubiously gaming sites.
-3. Sites that are obviously _not_ gaming sites.
-4. Sites that _could_ be used to host gaming discussions but aren't really meant
+1.  Sites that are obviously gaming sites under this criteria.
+2.  Sites that are dubiously gaming sites.
+3.  Sites that are obviously _not_ gaming sites.
+4.  Sites that _could_ be used to host gaming discussions but aren't really meant
    for it (like Reddit).  At some point we have to draw a line and say that it's
    a social media platform and should be blocked as such rather than a gaming
    site, even if it hosts gaming content.
 
 Obvious gaming sites:
-1. ign.com
-2. twitch.tv
+1.  ign.com
+2.  twitch.tv
 
 Dubious gaming sites:
-1. discord.com
-2. robertsspaceindustries.com (Star Citizen)
+1.  discord.com
+2.  robertsspaceindustries.com (Star Citizen)
 
 Obviously not gaming sites:
-1. khanacademy.org
-2. npr.org
+1.  khanacademy.org
+2.  npr.org
 
 General purpose platforms that could host gaming material but aren't dedicated
 to the purpose:
-1. reddit.com
-2. facebook.com
+1.  reddit.com
+2.  facebook.com
 
 
 #+begin_src sh :results output :exports both
@@ -402,26 +379,26 @@ DEFINITION OF "GAMING SITE"
 A site SHOULD be classified as a gaming site ("is_gaming_site": true) if its
 PRIMARY purpose is one or more of:
 
-1. Being about games:
+1.  Being about games:
    - Video game news, reviews, previews, guides, walkthroughs.
    - Information or media focused mainly on games.
 
-2. Being a platform for playing or distributing games:
+2.  Being a platform for playing or distributing games:
    - Hosts playable games directly in the browser or via downloads.
    - Launchers, portals, or catalogs for playing or acquiring games.
    - Examples that SHOULD be TRUE:
      - scratch.mit.edu (learn-to-code via interactive projects and games)
      - newgrounds.com (hosts lots of browser games and game-like content)
 
-3. Being a platform specifically aimed at game creation or game mods:
+3.  Being a platform specifically aimed at game creation or game mods:
    - Game engines, asset stores, or tools whose primary branding is around game development.
 
-4. Being a site primarily about game-related community or esports:
+4.  Being a site primarily about game-related community or esports:
    - Forums, wikis, or news sites dedicated mainly to specific games or gaming communities.
 
 A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
 
-1. It is a general-purpose social network, chat platform, or content host
+1.  It is a general-purpose social network, chat platform, or content host
    whose main purpose is NOT specifically gaming, even if it has a lot of game content.
    - Examples that SHOULD be FALSE:
      - reddit.com (general social/forum platform)
@@ -429,23 +406,23 @@ A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
      - discord.com (general chat/communities, not solely gaming)
      - youtube.com (general video platform)
 
-2. It is obviously about something else:
+2.  It is obviously about something else:
    - News, banking, education, general tech, streaming for all topics, etc.,
      with gaming only as a minor or incidental category.
 
-3. The provided information is too vague or generic to clearly indicate
-   a primary gaming focus. In that case, be conservative and answer false
+3.  The provided information is too vague or generic to clearly indicate
+   a primary gaming focus.  In that case, be conservative and answer false
    with a lower confidence.
 
 INPUT FORMAT
 
-You will receive a single JSON object describing the site. It will always include:
+You will receive a single JSON object describing the site.  It will always include:
 - "domain": the domain name as a string.
 - At least one free-text field with descriptive text, for example:
   - "summary", "description", "title", "meta_description", "og_description", etc.
 
-The JSON may include MORE fields in the future. Treat all string fields as possible
-clues about the site's purpose. Ignore fields you do not understand; do NOT fail
+The JSON may include MORE fields in the future.  Treat all string fields as possible
+clues about the site's purpose.  Ignore fields you do not understand; do NOT fail
 because of unknown fields.
 
 IMPORTANT OUTPUT RULES
@@ -541,26 +518,26 @@ DEFINITION OF "GAMING SITE"
 A site SHOULD be classified as a gaming site ("is_gaming_site": true) if its
 PRIMARY purpose is one or more of:
 
-1. Being about games:
+1.  Being about games:
    - Video game news, reviews, previews, guides, walkthroughs.
    - Information or media focused mainly on games.
 
-2. Being a platform for playing or distributing games:
+2.  Being a platform for playing or distributing games:
    - Hosts playable games directly in the browser or via downloads.
    - Launchers, portals, or catalogs for playing or acquiring games.
    - Examples that SHOULD be TRUE:
      - scratch.mit.edu (learn-to-code via interactive projects and games)
      - newgrounds.com (hosts lots of browser games and game-like content)
 
-3. Being a platform specifically aimed at game creation or game mods:
+3.  Being a platform specifically aimed at game creation or game mods:
    - Game engines, asset stores, or tools whose primary branding is around game development.
 
-4. Being a site primarily about game-related community or esports:
+4.  Being a site primarily about game-related community or esports:
    - Forums, wikis, or news sites dedicated mainly to specific games or gaming communities.
 
 A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
 
-1. It is a general-purpose social network, chat platform, or content host
+1.  It is a general-purpose social network, chat platform, or content host
    whose main purpose is NOT specifically gaming, even if it has a lot of game content.
    - Examples that SHOULD be FALSE:
      - reddit.com (general social/forum platform)
@@ -568,23 +545,23 @@ A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
      - discord.com (general chat/communities, not solely gaming)
      - youtube.com (general video platform)
 
-2. It is obviously about something else:
+2.  It is obviously about something else:
    - News, banking, education, general tech, streaming for all topics, etc.,
      with gaming only as a minor or incidental category.
 
-3. The provided information is too vague or generic to clearly indicate
-   a primary gaming focus. In that case, be conservative and answer false
+3.  The provided information is too vague or generic to clearly indicate
+   a primary gaming focus.  In that case, be conservative and answer false
    with a lower confidence.
 
 INPUT FORMAT
 
-You will receive a single JSON object describing the site. It will always include:
+You will receive a single JSON object describing the site.  It will always include:
 - "domain": the domain name as a string.
 - At least one free-text field with descriptive text, for example:
   - "summary", "description", "title", "meta_description", "og_description", etc.
 
-The JSON may include MORE fields in the future. Treat all string fields as possible
-clues about the site's purpose. Ignore fields you do not understand; do NOT fail
+The JSON may include MORE fields in the future.  Treat all string fields as possible
+clues about the site's purpose.  Ignore fields you do not understand; do NOT fail
 because of unknown fields.
 
 IMPORTANT OUTPUT RULES
