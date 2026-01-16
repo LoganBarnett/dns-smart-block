@@ -1,0 +1,21 @@
+[package]
+name = "dns-smart-block-queue-processor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Local dependencies
+dns-smart-block-worker = { path = "../worker" }
+
+# External dependencies
+clap = { version = "*", features = ["derive", "env"] }
+tokio = { version = "*", features = ["full"] }
+async-nats = "0.33"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+thiserror = "*"
+futures = "*"
+chrono = "*"
+base64ct = "1.6"
