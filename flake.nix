@@ -1,7 +1,7 @@
 {
   description = "A voice operated computer like this is the future.";
   inputs = {
-    nixpkgs.url = github:NixOS/nixpkgs/nixpkgs-unstable;
+    nixpkgs.url = github:NixOS/nixpkgs/25.11;
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
   };
@@ -19,6 +19,7 @@
     ];
     pkgsFor = system: import nixpkgs { inherit overlays system; };
     packages = (pkgs: let
+
       rust = pkgs.rust-bin.stable.latest.default.override {
         extensions = [
           # For rust-analyzer and others.  See
