@@ -1,3 +1,6 @@
 [workspace]
-members = ["worker"]
+members = ["worker", "log-processor", "queue-processor"]
 resolver = "2"
+
+[workspace.dependencies]
+base64ct = "1.6"

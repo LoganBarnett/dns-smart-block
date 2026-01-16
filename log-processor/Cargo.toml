@@ -1,0 +1,30 @@
+[package]
+name = "dns-smart-block-log-processor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dns_smart_block_log_processor"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "*", features = ["derive", "env"] }
+tokio = { version = "*", features = ["full"] }
+tokio-util = { version = "*", features = ["codec"] }
+futures = "*"
+async-stream = "*"
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+thiserror = "*"
+reqwest = { version = "*", features = ["json"] }
+async-nats = "0.33"
+regex = "*"
+notify = "6"
+chrono = "*"
+base64ct = "1.6"
+
+[dev-dependencies]
+wiremock = "0.5"
+tokio-test = "*"
