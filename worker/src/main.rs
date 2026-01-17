@@ -1,9 +1,9 @@
 use clap::Parser;
 use dns_smart_block_worker::{
-    cli_args::CliArgs,
-    classify_with_llm,
-    error::WorkerError,
-    web_classify::{extract_metadata, fetch_domain},
+  classify_with_llm,
+  cli_args::CliArgs,
+  error::WorkerError,
+  web_classify::{extract_metadata, fetch_domain},
 };
 use tracing::{error, info, warn};
 
@@ -24,26 +24,19 @@ async fn main() -> Result<(), WorkerError> {
   info!("Ollama URL: {}", args.ollama_url);
   info!("Ollama Model: {}", args.ollama_model);
 
-  let prompt_template = std::fs::read_to_string(
-    &args.prompt_template,
-  )
-  .map_err(|e| {
-    error!(
-      "Failed to read prompt template from {:?}: {}",
-      args.prompt_template, e
-    );
-    e
-  })?;
+  let prompt_template = std::fs::read_to_string(&args.prompt_template)
+    .map_err(|e| {
+      error!(
+        "Failed to read prompt template from {:?}: {}",
+        args.prompt_template, e
+      );
+      e
+    })?;
 
-  let (html, status) = fetch_domain(
-    &args.domain,
-    args.http_timeout_sec,
-    args.http_max_kb,
-  )
-  .await?;
+  let (html, status) =
+    fetch_domain(&args.domain, args.http_timeout_sec, args.http_max_kb).await?;
 
-  let metadata =
-    extract_metadata(&args.domain, &html, status)?;
+  let metadata = extract_metadata(&args.domain, &html, status)?;
 
   if metadata.title.is_none()
     && metadata.description.is_none()
@@ -64,10 +57,7 @@ async fn main() -> Result<(), WorkerError> {
   .await?;
 
   info!("Classification result: {:#?}", classification);
-  info!(
-    "Is gaming site: {}",
-    classification.is_matching_site
-  );
+  info!("Is gaming site: {}", classification.is_matching_site);
   info!("Confidence: {:.2}", classification.confidence);
 
   Ok(())

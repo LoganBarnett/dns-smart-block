@@ -13,11 +13,7 @@ pub struct CliArgs {
   pub domain: String,
 
   /// Ollama API URL.
-  #[arg(
-    long,
-    env = "OLLAMA_URL",
-    default_value = "http://localhost:11434"
-  )]
+  #[arg(long, env = "OLLAMA_URL", default_value = "http://localhost:11434")]
   pub ollama_url: String,
 
   /// Ollama model to use.
@@ -29,11 +25,7 @@ pub struct CliArgs {
   pub ollama_model: String,
 
   /// Path to prompt template file.
-  #[arg(
-    long,
-    env = "PROMPT_TEMPLATE",
-    default_value = "prompt-template.txt"
-  )]
+  #[arg(long, env = "PROMPT_TEMPLATE", default_value = "prompt-template.txt")]
   pub prompt_template: PathBuf,
 
   /// HTTP timeout in seconds.

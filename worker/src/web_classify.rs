@@ -41,9 +41,7 @@ pub async fn fetch_domain(
     .gzip(true)
     .build()?;
 
-  let url = if domain.starts_with("http://")
-    || domain.starts_with("https://")
-  {
+  let url = if domain.starts_with("http://") || domain.starts_with("https://") {
     domain.to_string()
   } else {
     format!("https://{}", domain)
@@ -51,8 +49,11 @@ pub async fn fetch_domain(
 
   let response = client
     .get(&url)
-    .header("Accept", "text/html,application/xhtml+xml,\
-      application/xml;q=0.9,*/*;q=0.8")
+    .header(
+      "Accept",
+      "text/html,application/xhtml+xml,\
+      application/xml;q=0.9,*/*;q=0.8",
+    )
     .header("Accept-Language", "en-US,en;q=0.9")
     .send()
     .await?;
@@ -110,20 +111,13 @@ pub fn extract_metadata(
   info!("Extracting metadata from HTML");
   let document = Html::parse_document(html);
   let title = text_from_css_selector(&document, "title");
-  let description = attr_from_css_selector(
-    &document,
-    "meta[name='description']",
-    "content",
-  );
+  let description =
+    attr_from_css_selector(&document, "meta[name='description']", "content");
   let og_title = text_from_css_selector(&document, "meta[property='og:title']");
-  let og_description = text_from_css_selector(
-    &document,
-    "meta[property='og:description']",
-  );
-  let og_site_name = text_from_css_selector(
-    &document,
-    "meta[property='og:site_name']",
-  );
+  let og_description =
+    text_from_css_selector(&document, "meta[property='og:description']");
+  let og_site_name =
+    text_from_css_selector(&document, "meta[property='og:site_name']");
   let language = text_from_css_selector(&document, "html");
   Ok(SiteMetadata {
     domain: domain.to_string(),

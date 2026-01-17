@@ -1,11 +1,7 @@
 use clap::Parser;
 use dns_smart_block_log_processor::{
-  cli_args::CliArgs,
-  dnsdist::DnsdistClient,
-  log_parser::LogParser,
-  log_source::LogSource,
-  queue::QueuePublisher,
-  ProcessorError, Result,
+  ProcessorError, Result, cli_args::CliArgs, dnsdist::DnsdistClient,
+  log_parser::LogParser, log_source::LogSource, queue::QueuePublisher,
 };
 use futures::StreamExt;
 use std::collections::HashSet;
@@ -32,7 +28,8 @@ async fn main() -> Result<()> {
 
   // Initialize components
   let parser = LogParser::new()?;
-  let queue = QueuePublisher::new(&args.nats_url, args.nats_subject.clone()).await?;
+  let queue =
+    QueuePublisher::new(&args.nats_url, args.nats_subject.clone()).await?;
 
   let dnsdist_client = if let Some(ref url) = args.dnsdist_api_url {
     if args.skip_dnsdist_check {
@@ -51,18 +48,19 @@ async fn main() -> Result<()> {
   };
 
   // Track seen domains to avoid duplicate processing
-  let seen_domains: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+  let seen_domains: Arc<Mutex<HashSet<String>>> =
+    Arc::new(Mutex::new(HashSet::new()));
 
   // Create log source
   let log_source = if args.is_command_source() {
-    let cmd = args
-      .get_command()
-      .ok_or_else(|| ProcessorError::InvalidLogSource("Invalid command".to_string()))?;
+    let cmd = args.get_command().ok_or_else(|| {
+      ProcessorError::InvalidLogSource("Invalid command".to_string())
+    })?;
     LogSource::from_command(cmd)
   } else {
-    let path = args
-      .get_file_path()
-      .ok_or_else(|| ProcessorError::InvalidLogSource("Invalid file path".to_string()))?;
+    let path = args.get_file_path().ok_or_else(|| {
+      ProcessorError::InvalidLogSource("Invalid file path".to_string())
+    })?;
     LogSource::from_file(path)
   };
 
@@ -86,10 +84,7 @@ async fn main() -> Result<()> {
           if let Some(ref client) = dnsdist_client {
             match client.is_domain_blocked(&domain).await {
               Ok(true) => {
-                info!(
-                  "Domain {} is already blocked, skipping queue",
-                  domain
-                );
+                info!("Domain {} is already blocked, skipping queue", domain);
                 seen.insert(domain);
                 continue;
               }
