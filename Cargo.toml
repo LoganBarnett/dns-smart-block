@@ -4,3 +4,6 @@ resolver = "2"
 
 [workspace.dependencies]
 base64ct = "1.6"
+
+[workspace.package]
+edition = "2024"
