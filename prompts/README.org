@@ -1,0 +1,103 @@
+#+title: Bundled Classifier Prompts
+
+This directory contains pre-built LLM classifier prompts that are bundled
+with DNS Smart Block.
+
+* Available Prompts
+
+** gaming-classifier.txt
+
+Classifies gaming-related websites including:
+
+- Video game news, reviews, and guides (e.g., IGN, GameSpot)
+- Game distribution platforms (e.g., Steam, Epic Games Store)
+- Browser game portals (e.g., Newgrounds, Scratch)
+- Game development platforms
+- Esports and gaming communities
+
+*Classification Criteria:*
+
+- ~is_matching_site: true~ - Site's PRIMARY purpose is gaming-related
+- ~is_matching_site: false~ - General platforms with gaming content
+  (e.g., YouTube, Reddit, Discord)
+
+*Usage in NixOS:*
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  classifier.preset = "gaming";
+};
+#+end_src
+
+*Usage with CLI:*
+
+The prompt is installed to:
+
+#+begin_example
+$out/share/dns-smart-block/prompts/gaming-classifier.txt
+#+end_example
+
+In Nix, reference it as:
+
+#+begin_src nix :exports code
+"${pkgs.dns-smart-block-worker}/share/dns-smart-block/prompts/gaming-classifier.txt"
+#+end_src
+
+* Creating Custom Prompts
+
+You can create your own classifier prompts using this template:
+
+#+begin_example
+You are a strict JSON-only classifier.
+
+Your task:
+- Decide whether a given website matches YOUR_CRITERIA
+- Output ONLY a JSON object with two fields:
+  - "is_matching_site": a boolean
+  - "confidence": a number between 0 and 1
+
+DEFINITION OF MATCHING SITE
+[Your definition here]
+
+INPUT FORMAT
+You will receive a JSON object with:
+- "domain": the domain name
+- Various text fields: "title", "description", "og_title", "og_description", etc.
+
+IMPORTANT OUTPUT RULES
+- Output MUST be valid JSON
+- Output MUST have exactly these two fields:
+  - "is_matching_site": boolean
+  - "confidence": number between 0 and 1
+- Do NOT include extra text, comments, or explanations
+- Do NOT wrap JSON in backticks
+
+EXAMPLES
+[Provide 3-5 examples of input/output pairs]
+
+NOW CLASSIFY THIS SITE
+
+Input:
+{{INPUT_JSON}}
+
+Output:
+#+end_example
+
+The ~{{INPUT_JSON}}~ placeholder will be replaced with the actual website
+metadata.
+
+* Contributing
+
+To add a new bundled classifier:
+
+1. Create ~prompts/your-classifier.txt~ following the template above
+2. Update ~nix/default.nix~ if needed (prompts are auto-copied via
+   ~postInstall~)
+3. Add the classifier name to ~nix/nixos-module.nix~:
+
+   #+begin_src nix :exports code
+   type = types.enum [ "gaming" "your-classifier" ];
+   #+end_src
+
+4. Update this README with documentation

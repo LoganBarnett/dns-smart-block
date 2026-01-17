@@ -1,0 +1,215 @@
+#+title: NixOS Module Summary
+
+* What Was Created
+
+A complete NixOS module for DNS Smart Block with the following components:
+
+** 1. NATS Server Service (~dns-smart-block-nats~)
+
+- *Purpose* - Dedicated NATS message queue for domain processing
+- *Non-Conflicting* - Uses configurable port (default 4222) - change if
+  you have another NATS instance
+- *Data Isolation* - Uses ~/var/lib/dns-smart-block-nats~ for data
+- *Security* - Runs as DynamicUser with restricted permissions
+
+** 2. Log Processor Service (~dns-smart-block-log-processor~)
+
+- *Purpose* - Watches DNS logs and publishes domains to NATS queue
+- *Log Sources Supported*:
+  - ~cmd:journalctl -f -u dnsdist~ - Real-time journal following
+    (recommended)
+  - ~/var/log/dnsdist.log~ - File-based log watching
+- *Permissions*:
+  - Automatically granted ~systemd-journal~ group when using journalctl
+  - Read-only access to log files when using file-based source
+- *Features*:
+  - Optional dnsdist API check to skip already-blocked domains
+  - Graceful error handling
+  - Automatic reconnection
+
+** 3. Queue Processor Service (~dns-smart-block-queue-processor~)
+
+- *Purpose* - Consumes domains from NATS and runs classification
+- *Integration* - Uses the worker library to fetch and classify domains
+- *Configuration* - Configurable confidence threshold, timeouts, and
+  limits
+- *Security* - Runs as DynamicUser with read-only access to prompt
+  template
+
+* Security Features
+
+All services implement defense-in-depth:
+
+- ✅ *DynamicUser* - New UID on each start, no persistent user
+- ✅ *NoNewPrivileges* - Cannot escalate privileges
+- ✅ *PrivateTmp* - Isolated ~/tmp~ directory
+- ✅ *ProtectSystem=strict* - Read-only root filesystem
+- ✅ *ProtectHome=true* - No access to ~/home~ directories
+- ✅ *ReadOnlyPaths* - Explicit read-only access where needed
+- ✅ *Secret Management* - Supports external secret files for API keys
+
+* Permissions Model
+
+** Log Processor Permissions
+
+When using *journalctl* (recommended):
+
+#+begin_example
+User: DynamicUser (e.g., uid 63281)
+Groups: [DynamicUser, systemd-journal]
+Access: Can read systemd journal for all units
+#+end_example
+
+When using *file source*:
+
+#+begin_example
+User: DynamicUser
+Groups: [DynamicUser]
+Access: Read-only to specified file path
+#+end_example
+
+** Why This Works
+
+*For journald access:*
+
+- systemd-journal group grants read access to ~/var/log/journal~
+- No need for root privileges
+- Works with dnsdist logging to journald
+
+*For file access:*
+
+- ~ReadOnlyPaths~ in systemd service config
+- File must be readable by the dynamic user
+- Recommended: dnsdist should write logs with appropriate permissions
+
+* NATS Isolation
+
+The built-in NATS server is isolated from other NATS instances:
+
+1. *Separate Port* - Default 4222, but configurable
+2. *Separate Data Directory* - ~/var/lib/dns-smart-block-nats~
+3. *Separate Subject* - ~dns.smart-block.domains~ (not ~dns.domains~)
+4. *Optional* - Can be disabled entirely to use external NATS
+
+* Configuration Examples
+
+** Minimal Configuration
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  classifier.preset = "gaming";
+};
+#+end_src
+
+** Production Configuration
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+
+  # Custom NATS port to avoid conflicts
+  nats.port = 14222;
+
+  # Watch dnsdist via journalctl
+  logProcessor = {
+    enable = true;
+    logSource = "cmd:journalctl -f -u dnsdist";
+  };
+
+  # Conservative classification
+  queueProcessor = {
+    enable = true;
+    minConfidence = 0.9;  # Very confident before blocking
+    httpTimeoutSec = 15;
+    httpMaxKb = 200;
+  };
+
+  # Use local Ollama
+  ollama = {
+    url = "http://localhost:11434";
+    model = "llama3";
+  };
+
+  # dnsdist integration with secret management
+  dnsdist = {
+    apiUrl = "http://localhost:8080";
+    apiKeyFile = config.age.secrets.dnsdist-key.path;
+  };
+
+  classifier.preset = "gaming";
+};
+#+end_src
+
+** Multiple NATS on Same System
+
+#+begin_src nix :exports code
+# Your existing NATS
+services.nats = {
+  enable = true;
+  port = 4222;  # Default NATS port
+};
+
+# DNS Smart Block NATS (non-conflicting)
+services.dns-smart-block = {
+  enable = true;
+  nats = {
+    enable = true;
+    port = 14222;  # Different port
+    subject = "dns.smart-block.domains";
+  };
+  classifier.preset = "gaming";
+};
+#+end_src
+
+* Monitoring
+
+** Check Service Status
+
+#+begin_src sh :exports code
+systemctl status dns-smart-block-nats
+systemctl status dns-smart-block-log-processor
+systemctl status dns-smart-block-queue-processor
+#+end_src
+
+** View Logs
+
+#+begin_src sh :exports code
+# Follow all services
+journalctl -f -u dns-smart-block-*
+
+# Individual service logs
+journalctl -u dns-smart-block-log-processor -f
+journalctl -u dns-smart-block-queue-processor -f
+
+# Check for errors
+journalctl -u dns-smart-block-log-processor -p err
+#+end_src
+
+** Verify NATS Connectivity
+
+#+begin_src sh :exports code
+# Check NATS port is listening
+ss -tlnp | grep 14222
+
+# Check service can connect
+systemctl status dns-smart-block-log-processor | grep "Connected to NATS"
+#+end_src
+
+* Files
+
+- ~nixos-module.nix~ - The NixOS module implementation
+- ~module-example.nix~ - Example configuration
+- ~MODULE.org~ - Comprehensive documentation
+- ~SUMMARY.org~ - This file
+
+* Next Steps
+
+1. Add to your NixOS configuration (see module-example.nix)
+2. Decide whether to use bundled classifier preset or create custom
+   template
+3. Configure dnsdist to log appropriately
+4. Set up Ollama with your desired model
+5. Deploy and monitor
+
+See *MODULE.org* for complete usage documentation.

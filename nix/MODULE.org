@@ -1,0 +1,345 @@
+#+title: NixOS Module Documentation
+
+The DNS Smart Block NixOS module provides a complete service setup for
+running the DNS smart blocking system on NixOS.
+
+* Features
+
+- *Systemd Services* - Automatically configured systemd services for
+  log-processor and queue-processor
+- *Built-in NATS* - Optional dedicated NATS server that won't conflict
+  with other instances
+- *Proper Permissions* - Log-processor can read dnsdist logs via
+  systemd-journal group
+- *Security Hardening* - Services run with DynamicUser, NoNewPrivileges,
+  and restricted filesystem access
+- *Flexible Configuration* - Support for both file-based and
+  journalctl-based log sources
+
+* Quick Start
+
+** 1. Add to your flake inputs
+
+#+begin_src nix :exports code
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    dns-smart-block.url = "github:yourusername/dns-smart-block";
+  };
+
+  outputs = { self, nixpkgs, dns-smart-block }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        dns-smart-block.nixosModules.default
+        ./configuration.nix
+      ];
+    };
+  };
+}
+#+end_src
+
+** 2. Configure in your system configuration
+
+#+begin_src nix :exports code
+{ config, pkgs, ... }:
+
+{
+  services.dns-smart-block = {
+    enable = true;
+
+    # The module will automatically set up NATS
+    nats = {
+      enable = true;
+      port = 4222;  # Uses non-standard port to avoid conflicts
+    };
+
+    # Watch dnsdist logs via journalctl (requires systemd-journal group)
+    logProcessor = {
+      enable = true;
+      logSource = "cmd:journalctl -f -u dnsdist";
+    };
+
+    # Process domains from queue
+    queueProcessor = {
+      enable = true;
+      minConfidence = 0.8;
+    };
+
+    # Point to your Ollama instance
+    ollama = {
+      url = "http://localhost:11434";
+      model = "llama2";
+    };
+
+    # Use bundled gaming classifier
+    classifier.preset = "gaming";
+  };
+}
+#+end_src
+
+* Configuration Options
+
+** NATS Options
+
+| Option           | Type   | Default                       | Description                      |
+|------------------+--------+-------------------------------+----------------------------------|
+| ~nats.enable~    | bool   | ~true~                        | Enable built-in NATS server      |
+| ~nats.port~      | port   | ~4222~                        | NATS server port                 |
+| ~nats.url~       | string | ~"nats://localhost:4222"~     | NATS URL (override for external) |
+| ~nats.subject~   | string | ~"dns.smart-block.domains"~   | NATS subject for messages        |
+| ~nats.dataDir~   | path   | ~"/var/lib/dns-smart-block-nats"~ | NATS data directory          |
+
+** Log Processor Options
+
+| Option                          | Type   | Default                         | Description                    |
+|---------------------------------+--------+---------------------------------+--------------------------------|
+| ~logProcessor.enable~           | bool   | ~true~                          | Enable log processor service   |
+| ~logProcessor.logSource~        | string | ~"cmd:journalctl -f -u dnsdist"~ | Log source (file or command)   |
+| ~logProcessor.skipDnsdistCheck~ | bool   | ~false~                         | Skip checking if already blocked |
+
+** Queue Processor Options
+
+| Option                           | Type  | Default | Description                      |
+|----------------------------------+-------+---------+----------------------------------|
+| ~queueProcessor.enable~          | bool  | ~true~  | Enable queue processor service   |
+| ~queueProcessor.httpTimeoutSec~  | int   | ~10~    | HTTP timeout for fetching domains |
+| ~queueProcessor.httpMaxKb~       | int   | ~100~   | Max KB to download per domain    |
+| ~queueProcessor.minConfidence~   | float | ~0.8~   | Min confidence to block (0.0-1.0) |
+
+** Ollama Options
+
+| Option         | Type   | Default                   | Description        |
+|----------------+--------+---------------------------+--------------------|
+| ~ollama.url~   | string | ~"http://localhost:11434"~ | Ollama server URL  |
+| ~ollama.model~ | string | ~"llama2"~                | Ollama model name  |
+
+** dnsdist Options
+
+| Option               | Type    | Default | Description             |
+|----------------------+---------+---------+-------------------------|
+| ~dnsdist.apiUrl~     | string? | ~null~  | dnsdist API URL         |
+| ~dnsdist.apiKeyFile~ | path?   | ~null~  | Path to API key file    |
+
+** Classifier Options
+
+| Option                     | Type  | Default | Description                     |
+|----------------------------+-------+---------+---------------------------------|
+| ~classifier.preset~        | enum? | ~null~  | Use bundled preset ("gaming")   |
+| ~classifier.customTemplate~ | path? | ~null~  | Path to custom prompt template  |
+
+** Other Options
+
+| Option     | Type    | Default                       | Description              |
+|------------+---------+-------------------------------+--------------------------|
+| ~package~  | package | ~pkgs.dns-smart-block-worker~ | Package to use           |
+
+* Usage Scenarios
+
+** Scenario 1: Using journalctl (Recommended)
+
+This is the recommended approach as it works with dnsdist's journald
+integration:
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  logProcessor.logSource = "cmd:journalctl -f -u dnsdist";
+  classifier.preset = "gaming";
+};
+#+end_src
+
+*Permissions*: The service automatically gets ~systemd-journal~
+supplementary group.
+
+** Scenario 2: Using a log file
+
+If dnsdist writes to a file:
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  logProcessor.logSource = "/var/log/dnsdist/queries.log";
+  classifier.preset = "gaming";
+};
+#+end_src
+
+*Permissions*: The service gets read-only access to the specified file.
+
+** Scenario 3: Using external NATS
+
+If you already have a NATS server:
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  nats = {
+    enable = false;  # Disable built-in NATS
+    url = "nats://your-nats-server:4222";
+    subject = "custom.dns.subject";
+  };
+  classifier.preset = "gaming";
+};
+#+end_src
+
+** Scenario 4: With dnsdist API integration
+
+Enable blocking via dnsdist API:
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  dnsdist = {
+    apiUrl = "http://localhost:8080";
+    apiKeyFile = config.age.secrets.dnsdist-api-key.path;  # Using agenix
+  };
+  classifier.preset = "gaming";
+};
+#+end_src
+
+** Scenario 5: Custom prompt template
+
+Store your prompt inline:
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  classifier.customTemplate = pkgs.writeText "custom-prompt.txt" ''
+    You are classifying websites for social media content.
+
+    Analyze this metadata: {{INPUT_JSON}}
+
+    Respond with JSON:
+    {
+      "is_matching_site": true or false,
+      "confidence": 0.0 to 1.0
+    }
+  '';
+};
+#+end_src
+
+* Security Considerations
+
+** Service Hardening
+
+All services run with:
+
+- ~DynamicUser = true~ - No persistent user, different UID on each start
+- ~NoNewPrivileges = true~ - Cannot escalate privileges
+- ~PrivateTmp = true~ - Isolated ~/tmp~
+- ~ProtectSystem = "strict"~ - Read-only filesystem except specific paths
+- ~ProtectHome = true~ - No access to ~/home~
+
+** Log Access
+
+The log-processor needs to read dnsdist logs.  This is handled by:
+
+- *journalctl* - Service added to ~systemd-journal~ group
+- *File* - Service gets ~ReadOnlyPaths~ to the specific file
+
+** API Keys
+
+Never put API keys directly in configuration:
+
+#+begin_src nix :exports code
+# ❌ Bad - key visible in Nix store
+dnsdist.apiKeyFile = pkgs.writeText "key" "secret-key";
+
+# ✅ Good - key managed by secrets manager
+dnsdist.apiKeyFile = config.age.secrets.dnsdist-api-key.path;
+
+# ✅ Also good - key in /run/secrets
+dnsdist.apiKeyFile = "/run/secrets/dnsdist-api-key";
+#+end_src
+
+* Monitoring
+
+Check service status:
+
+#+begin_src sh :exports code
+# All services
+systemctl status dns-smart-block-*
+
+# Individual services
+systemctl status dns-smart-block-nats
+systemctl status dns-smart-block-log-processor
+systemctl status dns-smart-block-queue-processor
+
+# Follow logs
+journalctl -u dns-smart-block-log-processor -f
+journalctl -u dns-smart-block-queue-processor -f
+#+end_src
+
+* Troubleshooting
+
+** Log processor can't read logs
+
+If using journalctl, verify the service has journal access:
+
+#+begin_src sh :exports code
+systemctl show dns-smart-block-log-processor | grep SupplementaryGroups
+# Should show: SupplementaryGroups=systemd-journal
+#+end_src
+
+** NATS connection failed
+
+Verify NATS is running:
+
+#+begin_src sh :exports code
+systemctl status dns-smart-block-nats
+ss -tlnp | grep 4222  # Check port is listening
+#+end_src
+
+** Queue processor can't classify
+
+Check Ollama is accessible:
+
+#+begin_src sh :exports code
+curl http://localhost:11434/api/tags
+#+end_src
+
+Check the prompt template is readable:
+
+#+begin_src sh :exports code
+# As root
+cat /nix/store/.../your-prompt-template.txt
+#+end_src
+
+* Integration with Other Services
+
+** With Ollama
+
+#+begin_src nix :exports code
+services.ollama = {
+  enable = true;
+  acceleration = "cuda";  # or "rocm"
+  models = [ "llama2" ];
+};
+
+services.dns-smart-block = {
+  enable = true;
+  ollama.url = "http://localhost:11434";
+  ollama.model = "llama2";
+  classifier.preset = "gaming";
+};
+#+end_src
+
+** With dnsdist
+
+#+begin_src nix :exports code
+services.dnsdist = {
+  enable = true;
+  # ... your dnsdist config
+};
+
+services.dns-smart-block = {
+  enable = true;
+  logProcessor.logSource = "cmd:journalctl -f -u dnsdist";
+  dnsdist.apiUrl = "http://localhost:8080";
+  classifier.preset = "gaming";
+};
+#+end_src
+
+* Complete Example
+
+See [[file:module-example.nix][module-example.nix]] for a complete working example.

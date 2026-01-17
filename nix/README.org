@@ -1,0 +1,123 @@
+#+title: Nix Infrastructure
+
+This directory contains all Nix-related files for DNS Smart Block.
+
+* Files
+
+- *~default.nix~* - Crane-based derivations for building the Rust executables
+- *~nixos-module.nix~* - NixOS module for declarative service configuration
+- *~module-example.nix~* - Example NixOS configuration
+- *~MODULE.org~* - Comprehensive NixOS module documentation
+- *~README.org~* - This file
+
+* Quick Start
+
+** For NixOS Users (Recommended)
+
+Use the NixOS module for complete integration:
+
+#+begin_src nix :exports code
+# In your flake.nix
+{
+  inputs.dns-smart-block.url = "github:yourusername/dns-smart-block";
+
+  outputs = { nixpkgs, dns-smart-block, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        dns-smart-block.nixosModules.default
+        {
+          services.dns-smart-block = {
+            enable = true;
+            logProcessor.logSource = "cmd:journalctl -f -u dnsdist";
+            classifier.preset = "gaming";
+          };
+        }
+      ];
+    };
+  };
+}
+#+end_src
+
+See [[file:MODULE.org][MODULE.org]] for complete documentation.
+
+** For Non-NixOS Users
+
+Build and run the executables directly:
+
+#+begin_src sh :exports code
+# Build all executables
+nix build github:yourusername/dns-smart-block
+
+# Or build individually
+nix build github:yourusername/dns-smart-block#worker
+nix build github:yourusername/dns-smart-block#log-processor
+nix build github:yourusername/dns-smart-block#queue-processor
+
+# Run without building
+nix run github:yourusername/dns-smart-block#worker -- --help
+#+end_src
+
+* Package Structure
+
+The derivations build three executables:
+
+1. *~dns-smart-block-worker~* - Fetches domain content and classifies with
+   LLM
+2. *~dns-smart-block-log-processor~* - Watches DNS logs and publishes to NATS
+3. *~dns-smart-block-queue-processor~* - Consumes from NATS and runs the
+   worker
+
+* Development
+
+Enter a development shell with all dependencies:
+
+#+begin_src sh :exports code
+nix develop
+#+end_src
+
+This provides:
+- Rust toolchain (latest stable)
+- rust-analyzer and rustfmt
+- pkg-config and OpenSSL
+- cargo-sweep
+
+* NixOS Module Features
+
+The NixOS module provides:
+
+- ✅ *Built-in NATS server* - Dedicated instance that won't conflict with
+  others
+- ✅ *Systemd services* - Automatically configured with proper dependencies
+- ✅ *Security hardening* - DynamicUser, restricted filesystem access
+- ✅ *Proper permissions* - systemd-journal group for reading logs
+- ✅ *Flexible configuration* - Support for journalctl or file-based log
+  sources
+- ✅ *Secret management* - Supports external secret management (agenix,
+  sops-nix)
+
+* Overlay
+
+Use the overlay to add packages to your system:
+
+#+begin_src nix :exports code
+nixpkgs.overlays = [ dns-smart-block.overlays.default ];
+
+environment.systemPackages = [
+  pkgs.dns-smart-block-worker
+  pkgs.dns-smart-block-log-processor
+  pkgs.dns-smart-block-queue-processor
+];
+#+end_src
+
+* Build Caching
+
+The Crane-based build system intelligently separates:
+- *Dependency builds* - Cached and reused when only source changes
+- *Source builds* - Only rebuilt when source code changes
+
+This makes incremental builds very fast.
+
+* Documentation
+
+- [[file:MODULE.org][MODULE.org]] - Complete NixOS module documentation
+- [[file:module-example.nix][module-example.nix]] - Working example configuration

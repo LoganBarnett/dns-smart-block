@@ -1,5 +1,5 @@
 {
-  description = "A voice operated computer like this is the future.";
+  description = "DNS Smart Block - LLM-powered intelligent DNS blocking";
   inputs = {
     nixpkgs.url = github:NixOS/nixpkgs/25.11;
     rust-overlay.url = "github:oxalica/rust-overlay";
@@ -17,9 +17,13 @@
     overlays = [
       (import rust-overlay)
     ];
-    pkgsFor = system: import nixpkgs { inherit overlays system; };
-    packages = (pkgs: let
+    pkgsFor = system: import nixpkgs {
+      inherit system;
+      overlays = overlays;
+    };
 
+    # Development shell packages
+    devPackages = pkgs: let
       rust = pkgs.rust-bin.stable.latest.default.override {
         extensions = [
           # For rust-analyzer and others.  See
@@ -30,37 +34,64 @@
         ];
       };
     in [
-      pkgs.cargo-sweep
-      pkgs.clang
-      # To help build whisper-rs from whisper-cpp.
-      pkgs.cmake
-      # To help with finding openssl.
-      pkgs.pkg-config
       rust
-    ]);
+      pkgs.cargo-sweep
+      pkgs.pkg-config
+      pkgs.openssl
+    ];
   in {
 
     devShells = forAllSystems (system: {
       default = (pkgsFor system).mkShell {
-        buildInputs = (packages (pkgsFor system));
+        buildInputs = devPackages (pkgsFor system);
         shellHook = ''
+          echo "DNS Smart Block development environment"
+          echo "Available packages: worker, log-processor, queue-processor"
         '';
       };
     });
 
-    nixosModules.default = ./nix/nixos-module.nix;
+    packages = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      dnsSmartBlock = pkgs.callPackage ./nix/default.nix {
+        inherit crane;
+        inherit (inputs) rust-overlay;
+        inherit system;
+      };
+    in {
+      # Individual packages
+      worker = dnsSmartBlock.worker;
+      log-processor = dnsSmartBlock.log-processor;
+      queue-processor = dnsSmartBlock.queue-processor;
+
+      # Default to building all
+      default = dnsSmartBlock.all;
+    });
 
     overlays.default = final: prev: {
-      github-to-jenkins-webhook = final.callPackage ./nix/derivation.nix {
-        inherit crane;
-      };
+      dns-smart-block-worker = self.packages.${final.system}.worker;
+      dns-smart-block-log-processor = self.packages.${final.system}.log-processor;
+      dns-smart-block-queue-processor = self.packages.${final.system}.queue-processor;
     };
 
-    packages = forAllSystems (system: {
-      default = (pkgsFor system).callPackage ./nix/derivation.nix {
-        inherit crane;
+    # Apps for easy running
+    apps = forAllSystems (system: {
+      worker = {
+        type = "app";
+        program = "${self.packages.${system}.worker}/bin/dns-smart-block-worker";
+      };
+      log-processor = {
+        type = "app";
+        program = "${self.packages.${system}.log-processor}/bin/dns-smart-block-log-processor";
+      };
+      queue-processor = {
+        type = "app";
+        program = "${self.packages.${system}.queue-processor}/bin/dns-smart-block-queue-processor";
       };
     });
+
+    # NixOS Module
+    nixosModules.default = import ./nix/nixos-module.nix;
 
   };
 

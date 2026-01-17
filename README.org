@@ -108,38 +108,177 @@ dnsdist_handle -> parallel_flows.dnsdist_log
  └─────────────────────────────────────────────────────────────┘
 #+end_example
 
+* Host Configuration
+
+This section covers how to deploy and configure DNS Smart Block on your host system.
+
+** Nix / NixOS
+
+DNS Smart Block provides a comprehensive NixOS module for declarative
+service configuration.
+
+*** Quick Start
+
+Add to your NixOS flake configuration:
+
+#+begin_src nix :exports code
+{
+  inputs.dns-smart-block.url = "github:yourusername/dns-smart-block";
+
+  outputs = { nixpkgs, dns-smart-block, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        dns-smart-block.nixosModules.default
+        {
+          services.dns-smart-block = {
+            enable = true;
+
+            # Watch dnsdist logs via journalctl
+            logProcessor.logSource = "cmd:journalctl -f -u dnsdist";
+
+            # LLM configuration
+            ollama.url = "http://localhost:11434";
+            ollama.model = "llama2";
+
+            # Use the bundled gaming classifier
+            classifier.preset = "gaming";
+          };
+        }
+      ];
+    };
+  };
+}
+#+end_src
+
+*** Features
+
+The NixOS module provides:
+
+- *Built-in NATS server* - Dedicated instance that won't conflict with
+  other NATS services
+- *Systemd services* - Automatically configured log-processor and
+  queue-processor
+- *Security hardening* - Services run as DynamicUser with restricted
+  permissions
+- *Proper permissions* - Log-processor gets =systemd-journal= group for
+  reading logs
+- *Flexible log sources* - Support for both journalctl and file-based
+  log watching
+- *Secret management* - Compatible with agenix, sops-nix for API keys
+
+*** NATS Isolation
+
+The built-in NATS server is isolated to avoid conflicts:
+
+- Configurable port (default: 4222)
+- Separate data directory: =/var/lib/dns-smart-block-nats=
+- Unique subject: =dns.smart-block.domains=
+- Can be disabled to use external NATS
+
+*** Permissions
+
+When using =cmd:journalctl -f -u dnsdist=:
+- Service automatically gets =systemd-journal= supplementary group
+- Can read dnsdist logs without root privileges
+- Works with dnsdist's journald integration
+
+When using file-based log source:
+- Service gets read-only access to specified file path
+- No special privileges needed
+
+*** Configuration Options
+
+Key configuration options:
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  # Enable the service
+  enable = true;
+
+  # NATS configuration
+  nats.enable = true;              # Use built-in NATS
+  nats.port = 4222;                # Port (change if conflicts)
+  nats.subject = "dns.smart-block.domains";
+
+  # Log processor
+  logProcessor.enable = true;
+  logProcessor.logSource = "cmd:journalctl -f -u dnsdist";
+  logProcessor.skipDnsdistCheck = false;
+
+  # Queue processor
+  queueProcessor.enable = true;
+  queueProcessor.minConfidence = 0.8;    # 0.0 to 1.0
+  queueProcessor.httpTimeoutSec = 10;
+  queueProcessor.httpMaxKb = 100;
+
+  # Ollama LLM
+  ollama.url = "http://localhost:11434";
+  ollama.model = "llama2";
+
+  # dnsdist API (optional)
+  dnsdist.apiUrl = "http://localhost:8080";
+  dnsdist.apiKeyFile = "/run/secrets/dnsdist-api-key";
+
+  # Classifier - use bundled preset or custom template
+  classifier.preset = "gaming";        # Use bundled gaming classifier
+  # classifier.customTemplate = ./custom-prompt.txt;  # Or provide custom
+};
+#+end_src
+
+*** Monitoring
+
+Check service status:
+
+#+begin_src sh :exports code
+systemctl status dns-smart-block-nats
+systemctl status dns-smart-block-log-processor
+systemctl status dns-smart-block-queue-processor
+
+# View logs
+journalctl -f -u dns-smart-block-*
+#+end_src
+
+*** Documentation
+
+For complete documentation, see:
+- =nix/MODULE.org= - Comprehensive module documentation
+- =nix/module-example.nix= - Working example configuration
+- =nix/SUMMARY.org= - Quick reference guide
 
 * Tasks
 
 ** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - parallel node overlap
 
-One will notice some of the parallel nodes have an extra bar just sitting there.
-Reducing the size of the label doesn't seem to help, as everything just gets
-bunched up more when the nodes are rebalanced.  We'll want to get a minimal
-example going.
+One will notice some of the parallel nodes have an extra bar just sitting
+there.  Reducing the size of the label doesn't seem to help, as everything
+just gets bunched up more when the nodes are rebalanced.  We'll want to get
+a minimal example going.
 
 ** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - \n
 
-If you want to break up long labels, the generally accepted way to do things is
-via the ~\n~ character in ~d2~.  However in the ASCII renderer, this just prints
-a line break and the rendering engine is totally unaware of this.  This makes
-for broken rendering, and it's extra apparent when nodes are parallel.
+If you want to break up long labels, the generally accepted way to do
+things is via the ~\n~ character in ~d2~.  However in the ASCII renderer,
+this just prints a line break and the rendering engine is totally unaware
+of this.  This makes for broken rendering, and it's extra apparent when
+nodes are parallel.
 
 Make a minimal reproduction before filing.
 
 ** TODO [#C] Implement two Rust projects: A log-processor and a worker
 
-This is mostly just cargo gymnastics.  But any build machinery we produce should
-also be aware of this.  There might also be merit in a shared library.
+This is mostly just cargo gymnastics.  But any build machinery we produce
+should also be aware of this.  There might also be merit in a shared
+library.
 
 ** TODO [#C] Provide ideal setup
 
-Show how various systems that are not part of this project can be wired together
-to achieve the ultimately desired result.  This can be via NixOS services, and
-for the time being others can deconstruct that to suite their own
-configurations.  The fortunate thing about a NixOS setup is that it lays all of
-the chips on the table, so while it won't be executable for those not using
-NixOS, it will be explicit enough that anyone can duplicate it.
+Show how various systems that are not part of this project can be wired
+together to achieve the ultimately desired result.  This can be via NixOS
+services, and for the time being others can deconstruct that to suite their
+own configurations.  The fortunate thing about a NixOS setup is that it
+lays all of the chips on the table, so while it won't be executable for
+those not using NixOS, it will be explicit enough that anyone can duplicate
+it.
 
 The ideal setup consists of NATS for the queue and ~dnsdist~ for the DNS
 server.
@@ -149,9 +288,9 @@ server.
 ** KILL [#B] Worker does ~whois~
 CLOSED: [2025-11-18 Tue 14:17]
 
-~whois~ is now considered dated.  ~RDAP~ is the new hotness (and can be used via
-the ~rdap~ tool), but even that is pretty meaningless for our purposes, as
-nothing useful is published to them.
+~whois~ is now considered dated.  ~RDAP~ is the new hotness (and can be
+used via the ~rdap~ tool), but even that is pretty meaningless for our
+purposes, as nothing useful is published to them.
 
 ** TODO [#B] Worker does GET, follows redirect, extracts meta + text
 ** TODO [#B] Worker sends result to LLM
@@ -160,9 +299,9 @@ nothing useful is published to them.
 ** KILL [#A] Manually test ~whois~
 CLOSED: [2025-11-17 Mon 18:34]
 
-TLDR;  This was to test LLM behavior but then it turned into "How do I get
-useful information out of ~WHOIS~ / ~RDAP~?" and the answer is "you can't
-anymore/ever".
+TLDR;  This was to test LLM behavior but then it turned into "How do I
+get useful information out of ~WHOIS~ / ~RDAP~?" and the answer is "you
+can't anymore/ever".
 
 -----
 
@@ -304,19 +443,20 @@ Okay this is pretty useless.  Let's kill it.
 ** DONE [#A] Manually test LLM behavior
 CLOSED: [2025-11-18 Tue 14:17]
 
-Let's come up with a few test sites in order to prove this out.  For our topic
-in question, we'll use gaming sites.  A gaming site is a site that is either
-about games, a platform for playing games, a platform that could be used to play
-games, a place in which game discussions occur, game news sites, and so on.
+Let's come up with a few test sites in order to prove this out.  For our
+topic in question, we'll use gaming sites.  A gaming site is a site that is
+either about games, a platform for playing games, a platform that could be
+used to play games, a place in which game discussions occur, game news
+sites, and so on.
 
 We want a few domains that represent:
 1.  Sites that are obviously gaming sites under this criteria.
 2.  Sites that are dubiously gaming sites.
 3.  Sites that are obviously _not_ gaming sites.
-4.  Sites that _could_ be used to host gaming discussions but aren't really meant
-   for it (like Reddit).  At some point we have to draw a line and say that it's
-   a social media platform and should be blocked as such rather than a gaming
-   site, even if it hosts gaming content.
+4.  Sites that _could_ be used to host gaming discussions but aren't really
+   meant for it (like Reddit).  At some point we have to draw a line and say
+   that it's a social media platform and should be blocked as such rather
+   than a gaming site, even if it hosts gaming content.
 
 Obvious gaming sites:
 1.  ign.com
@@ -330,21 +470,23 @@ Obviously not gaming sites:
 1.  khanacademy.org
 2.  npr.org
 
-General purpose platforms that could host gaming material but aren't dedicated
-to the purpose:
+General purpose platforms that could host gaming material but aren't
+dedicated to the purpose:
 1.  reddit.com
 2.  facebook.com
 
 
 #+begin_src sh :results output :exports both
-# IGN apparently doesn't like anyone just sending a curl at them.  The nerve!
-# Apparently they haven't heard of Roko's Basilisk...
+# IGN apparently doesn't like anyone just sending a curl at them.
+# The nerve!  Apparently they haven't heard of Roko's Basilisk...
 curl \
   --location \
   --silent \
   --show-error \
-  --user-agent 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' \
-  --header 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' \
+  --user-agent 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' \
+  --header 'Accept: text/html,application/xhtml+xml,\
+application/xml;q=0.9,*/*;q=0.8' \
   --header 'Accept-Language: en-US,en;q=0.9' \
   --compressed \
   --fail-with-body \
@@ -357,12 +499,14 @@ curl \
 #+end_src
 
 #+RESULTS:
-: IGN is your #1 destination for all video game news, expert reviews, and walkthroughs.
-: IGN is your #1 destination for all video game news, expert reviews, and walkthroughs.
+: IGN is your #1 destination for all video game news, expert reviews,
+: and walkthroughs.
+: IGN is your #1 destination for all video game news, expert reviews,
+: and walkthroughs.
 
 
-Alright, I asked ChatGPT 5.1 nicely and it gave me a wonderfully detailed prompt
-to use:
+Alright, I asked ChatGPT 5.1 nicely and it gave me a wonderfully detailed
+prompt to use:
 
 #+name: prompt-template
 #+begin_src text
@@ -376,8 +520,8 @@ Your task:
 
 DEFINITION OF "GAMING SITE"
 
-A site SHOULD be classified as a gaming site ("is_gaming_site": true) if its
-PRIMARY purpose is one or more of:
+A site SHOULD be classified as a gaming site ("is_gaming_site": true) if
+its PRIMARY purpose is one or more of:
 
 1.  Being about games:
    - Video game news, reviews, previews, guides, walkthroughs.
@@ -387,19 +531,25 @@ PRIMARY purpose is one or more of:
    - Hosts playable games directly in the browser or via downloads.
    - Launchers, portals, or catalogs for playing or acquiring games.
    - Examples that SHOULD be TRUE:
-     - scratch.mit.edu (learn-to-code via interactive projects and games)
-     - newgrounds.com (hosts lots of browser games and game-like content)
+     - scratch.mit.edu (learn-to-code via interactive projects and
+       games)
+     - newgrounds.com (hosts lots of browser games and game-like
+       content)
 
 3.  Being a platform specifically aimed at game creation or game mods:
-   - Game engines, asset stores, or tools whose primary branding is around game development.
+   - Game engines, asset stores, or tools whose primary branding is
+     around game development.
 
 4.  Being a site primarily about game-related community or esports:
-   - Forums, wikis, or news sites dedicated mainly to specific games or gaming communities.
+   - Forums, wikis, or news sites dedicated mainly to specific games or
+     gaming communities.
 
-A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
+A site SHOULD NOT be classified as a gaming site ("is_gaming_site":
+false) if:
 
-1.  It is a general-purpose social network, chat platform, or content host
-   whose main purpose is NOT specifically gaming, even if it has a lot of game content.
+1.  It is a general-purpose social network, chat platform, or content
+   host whose main purpose is NOT specifically gaming, even if it has a
+   lot of game content.
    - Examples that SHOULD be FALSE:
      - reddit.com (general social/forum platform)
      - facebook.com (general social network)
@@ -407,23 +557,25 @@ A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
      - youtube.com (general video platform)
 
 2.  It is obviously about something else:
-   - News, banking, education, general tech, streaming for all topics, etc.,
-     with gaming only as a minor or incidental category.
+   - News, banking, education, general tech, streaming for all topics,
+     etc., with gaming only as a minor or incidental category.
 
-3.  The provided information is too vague or generic to clearly indicate
-   a primary gaming focus.  In that case, be conservative and answer false
-   with a lower confidence.
+3.  The provided information is too vague or generic to clearly
+   indicate a primary gaming focus.  In that case, be conservative and
+   answer false with a lower confidence.
 
 INPUT FORMAT
 
-You will receive a single JSON object describing the site.  It will always include:
+You will receive a single JSON object describing the site.  It will
+always include:
 - "domain": the domain name as a string.
 - At least one free-text field with descriptive text, for example:
-  - "summary", "description", "title", "meta_description", "og_description", etc.
+  - "summary", "description", "title", "meta_description",
+    "og_description", etc.
 
-The JSON may include MORE fields in the future.  Treat all string fields as possible
-clues about the site's purpose.  Ignore fields you do not understand; do NOT fail
-because of unknown fields.
+The JSON may include MORE fields in the future.  Treat all string fields
+as possible clues about the site's purpose.  Ignore fields you do not
+understand; do NOT fail because of unknown fields.
 
 IMPORTANT OUTPUT RULES
 
@@ -431,7 +583,8 @@ IMPORTANT OUTPUT RULES
 - Output MUST have exactly these two fields at the top level:
   - "is_gaming_site": boolean
   - "confidence": number between 0 and 1
-- Do NOT include any extra text, comments, or explanations outside the JSON.
+- Do NOT include any extra text, comments, or explanations outside the
+  JSON.
 - Do NOT wrap the JSON in backticks.
 
 EXAMPLES
@@ -440,7 +593,8 @@ Example 1
 Input:
 {
   "domain": "ign.com",
-  "summary": "IGN is your #1 destination for all video game news, expert reviews, and walkthroughs."
+  "summary": "IGN is your #1 destination for all video game news,\
+ expert reviews, and walkthroughs."
 }
 Output:
 { "is_gaming_site": true, "confidence": 0.99 }
@@ -449,7 +603,9 @@ Example 2
 Input:
 {
   "domain": "scratch.mit.edu",
-  "summary": "Scratch is a block-based visual programming language and online community for creating and sharing interactive media such as stories, games, and animations."
+  "summary": "Scratch is a block-based visual programming language\
+ and online community for creating and sharing interactive media such as\
+ stories, games, and animations."
 }
 Output:
 { "is_gaming_site": true, "confidence": 0.85 }
@@ -458,7 +614,8 @@ Example 3
 Input:
 {
   "domain": "newgrounds.com",
-  "summary": "Newgrounds is an online entertainment website and community featuring user-made games, movies, art and audio."
+  "summary": "Newgrounds is an online entertainment website and\
+ community featuring user-made games, movies, art and audio."
 }
 Output:
 { "is_gaming_site": true, "confidence": 0.9 }
@@ -467,7 +624,8 @@ Example 4
 Input:
 {
   "domain": "reddit.com",
-  "summary": "Reddit is a network of communities where people can dive into their interests, hobbies and passions."
+  "summary": "Reddit is a network of communities where people can dive\
+ into their interests, hobbies and passions."
 }
 Output:
 { "is_gaming_site": false, "confidence": 0.9 }
@@ -476,7 +634,8 @@ Example 5
 Input:
 {
   "domain": "khanacademy.org",
-  "summary": "Khan Academy is a nonprofit organization with the mission to provide a free, world-class education for anyone, anywhere."
+  "summary": "Khan Academy is a nonprofit organization with the\
+ mission to provide a free, world-class education for anyone, anywhere."
 }
 Output:
 { "is_gaming_site": false, "confidence": 0.99 }
@@ -495,9 +654,11 @@ Let's substitute:
 #+name: prompt
 #+begin_src sh :results output :exports both :noweb yes
 domain='ign.com'
-description='IGN is your #1 destination for all video game news, expert reviews, and walkthroughs.'
+description='IGN is your #1 destination for all video game news, \
+expert reviews, and walkthroughs.'
 sed \
-  "s/{{INPUT_JSON}}/{ \"domain\": \"${domain}\", \"description\": \"${description}\" }/" \
+  "s/{{INPUT_JSON}}/{ \"domain\": \"${domain}\", \
+\"description\": \"${description}\" }/" \
   <<'EOF'
 <<prompt-template>>
 EOF
@@ -515,8 +676,8 @@ Your task:
 
 DEFINITION OF "GAMING SITE"
 
-A site SHOULD be classified as a gaming site ("is_gaming_site": true) if its
-PRIMARY purpose is one or more of:
+A site SHOULD be classified as a gaming site ("is_gaming_site": true) if
+its PRIMARY purpose is one or more of:
 
 1.  Being about games:
    - Video game news, reviews, previews, guides, walkthroughs.
@@ -526,19 +687,25 @@ PRIMARY purpose is one or more of:
    - Hosts playable games directly in the browser or via downloads.
    - Launchers, portals, or catalogs for playing or acquiring games.
    - Examples that SHOULD be TRUE:
-     - scratch.mit.edu (learn-to-code via interactive projects and games)
-     - newgrounds.com (hosts lots of browser games and game-like content)
+     - scratch.mit.edu (learn-to-code via interactive projects and
+       games)
+     - newgrounds.com (hosts lots of browser games and game-like
+       content)
 
 3.  Being a platform specifically aimed at game creation or game mods:
-   - Game engines, asset stores, or tools whose primary branding is around game development.
+   - Game engines, asset stores, or tools whose primary branding is
+     around game development.
 
 4.  Being a site primarily about game-related community or esports:
-   - Forums, wikis, or news sites dedicated mainly to specific games or gaming communities.
+   - Forums, wikis, or news sites dedicated mainly to specific games or
+     gaming communities.
 
-A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
+A site SHOULD NOT be classified as a gaming site ("is_gaming_site":
+false) if:
 
-1.  It is a general-purpose social network, chat platform, or content host
-   whose main purpose is NOT specifically gaming, even if it has a lot of game content.
+1.  It is a general-purpose social network, chat platform, or content
+   host whose main purpose is NOT specifically gaming, even if it has a
+   lot of game content.
    - Examples that SHOULD be FALSE:
      - reddit.com (general social/forum platform)
      - facebook.com (general social network)
@@ -546,23 +713,25 @@ A site SHOULD NOT be classified as a gaming site ("is_gaming_site": false) if:
      - youtube.com (general video platform)
 
 2.  It is obviously about something else:
-   - News, banking, education, general tech, streaming for all topics, etc.,
-     with gaming only as a minor or incidental category.
+   - News, banking, education, general tech, streaming for all topics,
+     etc., with gaming only as a minor or incidental category.
 
-3.  The provided information is too vague or generic to clearly indicate
-   a primary gaming focus.  In that case, be conservative and answer false
-   with a lower confidence.
+3.  The provided information is too vague or generic to clearly
+   indicate a primary gaming focus.  In that case, be conservative and
+   answer false with a lower confidence.
 
 INPUT FORMAT
 
-You will receive a single JSON object describing the site.  It will always include:
+You will receive a single JSON object describing the site.  It will
+always include:
 - "domain": the domain name as a string.
 - At least one free-text field with descriptive text, for example:
-  - "summary", "description", "title", "meta_description", "og_description", etc.
+  - "summary", "description", "title", "meta_description",
+    "og_description", etc.
 
-The JSON may include MORE fields in the future.  Treat all string fields as possible
-clues about the site's purpose.  Ignore fields you do not understand; do NOT fail
-because of unknown fields.
+The JSON may include MORE fields in the future.  Treat all string fields
+as possible clues about the site's purpose.  Ignore fields you do not
+understand; do NOT fail because of unknown fields.
 
 IMPORTANT OUTPUT RULES
 
@@ -570,7 +739,8 @@ IMPORTANT OUTPUT RULES
 - Output MUST have exactly these two fields at the top level:
   - "is_gaming_site": boolean
   - "confidence": number between 0 and 1
-- Do NOT include any extra text, comments, or explanations outside the JSON.
+- Do NOT include any extra text, comments, or explanations outside the
+  JSON.
 - Do NOT wrap the JSON in backticks.
 
 EXAMPLES
@@ -579,7 +749,8 @@ Example 1
 Input:
 {
   "domain": "ign.com",
-  "summary": "IGN is your #1 destination for all video game news, expert reviews, and walkthroughs."
+  "summary": "IGN is your #1 destination for all video game news,\
+ expert reviews, and walkthroughs."
 }
 Output:
 { "is_gaming_site": true, "confidence": 0.99 }
@@ -588,7 +759,9 @@ Example 2
 Input:
 {
   "domain": "scratch.mit.edu",
-  "summary": "Scratch is a block-based visual programming language and online community for creating and sharing interactive media such as stories, games, and animations."
+  "summary": "Scratch is a block-based visual programming language\
+ and online community for creating and sharing interactive media such as\
+ stories, games, and animations."
 }
 Output:
 { "is_gaming_site": true, "confidence": 0.85 }
@@ -597,7 +770,8 @@ Example 3
 Input:
 {
   "domain": "newgrounds.com",
-  "summary": "Newgrounds is an online entertainment website and community featuring user-made games, movies, art and audio."
+  "summary": "Newgrounds is an online entertainment website and\
+ community featuring user-made games, movies, art and audio."
 }
 Output:
 { "is_gaming_site": true, "confidence": 0.9 }
@@ -606,7 +780,8 @@ Example 4
 Input:
 {
   "domain": "reddit.com",
-  "summary": "Reddit is a network of communities where people can dive into their interests, hobbies and passions."
+  "summary": "Reddit is a network of communities where people can dive\
+ into their interests, hobbies and passions."
 }
 Output:
 { "is_gaming_site": false, "confidence": 0.9 }
@@ -615,7 +790,8 @@ Example 5
 Input:
 {
   "domain": "khanacademy.org",
-  "summary": "Khan Academy is a nonprofit organization with the mission to provide a free, world-class education for anyone, anywhere."
+  "summary": "Khan Academy is a nonprofit organization with the\
+ mission to provide a free, world-class education for anyone, anywhere."
 }
 Output:
 { "is_gaming_site": false, "confidence": 0.99 }
@@ -641,7 +817,8 @@ export full_prompt
 export model='qwen3:8b'
 jq \
   --null-input \
-  '{ model: $ENV.model, prompt: $ENV.full_prompt, format: "json", stream: false}' \
+  '{ model: $ENV.model, prompt: $ENV.full_prompt, format: "json", \
+stream: false}' \
     2>&1 \
   | curl \
     --location \
