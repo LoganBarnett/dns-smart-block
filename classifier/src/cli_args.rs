@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-  name = "dns-smart-block-worker",
+  name = "dns-smart-block-classifier",
   version,
-  about = "Worker for DNS smart blocking using LLM classification"
+  about = "Classifier for DNS smart blocking using LLM classification"
 )]
 pub struct CliArgs {
   /// Domain to classify.
@@ -28,6 +28,10 @@ pub struct CliArgs {
   #[arg(long, env = "PROMPT_TEMPLATE", default_value = "prompt-template.txt")]
   pub prompt_template: PathBuf,
 
+  /// Classification type (e.g., "gaming").
+  #[arg(long, env = "CLASSIFICATION_TYPE", default_value = "gaming")]
+  pub classification_type: String,
+
   /// HTTP timeout in seconds.
   #[arg(long, env = "HTTP_TIMEOUT_SEC", default_value = "5")]
   pub http_timeout_sec: u64,
@@ -35,4 +39,8 @@ pub struct CliArgs {
   /// Maximum HTTP response size in KB.
   #[arg(long, env = "HTTP_MAX_KB", default_value = "200")]
   pub http_max_kb: usize,
+
+  /// Output format (json or human-readable).
+  #[arg(long, env = "OUTPUT", default_value = "human")]
+  pub output: String,
 }

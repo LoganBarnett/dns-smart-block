@@ -1,4 +1,6 @@
 pub mod cli_args;
+pub mod database_url;
+pub mod db;
 pub mod dnsdist;
 pub mod log_parser;
 pub mod log_source;
@@ -28,6 +30,15 @@ pub enum ProcessorError {
 
   #[error("Invalid log source: {0}")]
   InvalidLogSource(String),
+
+  #[error("Database error: {0}")]
+  DatabaseError(#[from] db::DbError),
+
+  #[error("SQL error: {0}")]
+  SqlxError(#[from] sqlx::Error),
+
+  #[error("Database URL error: {0}")]
+  DatabaseUrlError(#[from] database_url::DatabaseUrlError),
 }
 
 pub type Result<T> = std::result::Result<T, ProcessorError>;

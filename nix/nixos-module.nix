@@ -151,12 +151,64 @@ in {
           Only used if classifier.preset is null.
         '';
       };
+
+      type = mkOption {
+        type = types.str;
+        default = "gaming";
+        description = "Classification type label for database storage";
+      };
+
+      ttlDays = mkOption {
+        type = types.int;
+        default = 10;
+        description = "Number of days classifications remain valid";
+      };
+    };
+
+    # Database Configuration
+    database = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Enable built-in PostgreSQL database (recommended)";
+      };
+
+      name = mkOption {
+        type = types.str;
+        default = "dns_smart_block";
+        description = "PostgreSQL database name";
+      };
+
+      user = mkOption {
+        type = types.str;
+        default = "dns_smart_block";
+        description = "PostgreSQL user name";
+      };
+
+      passwordFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = "/run/secrets/db-password";
+        description = "Path to file containing database password (optional for local peer auth)";
+      };
+
+      host = mkOption {
+        type = types.str;
+        default = "/run/postgresql";
+        description = "PostgreSQL host (use socket path for local peer auth)";
+      };
+
+      port = mkOption {
+        type = types.port;
+        default = 5432;
+        description = "PostgreSQL port";
+      };
     };
 
     # Package Options
     package = mkOption {
       type = types.package;
-      default = pkgs.dns-smart-block-worker;
+      default = pkgs.dns-smart-block-classifier;
       description = "Package providing dns-smart-block executables";
     };
   };
@@ -168,12 +220,31 @@ in {
         "${cfg.package}/share/dns-smart-block/prompts/gaming-classifier.txt"
       else
         cfg.classifier.customTemplate;
+
+    # Construct database URL
+    databaseUrl =
+      if cfg.database.host == "/run/postgresql" then
+        # Unix socket connection with peer authentication
+        "postgresql://${cfg.database.user}@/${cfg.database.name}?host=/run/postgresql"
+      else
+        # TCP connection
+        "postgresql://${cfg.database.user}@${cfg.database.host}:${toString cfg.database.port}/${cfg.database.name}";
   in {
 
     # Install packages
     environment.systemPackages = [
       cfg.package
     ];
+
+    # PostgreSQL Service
+    services.postgresql = mkIf cfg.database.enable {
+      enable = true;
+      ensureDatabases = [ cfg.database.name ];
+      ensureUsers = [{
+        name = cfg.database.user;
+        ensureDBOwnership = true;
+      }];
+    };
 
     # NATS Server Service
     systemd.services.dns-smart-block-nats = mkIf cfg.nats.enable {
@@ -204,15 +275,20 @@ in {
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ]
         ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service"
+        ++ lib.optional cfg.database.enable "postgresql.service"
         ++ lib.optional (lib.hasPrefix "cmd:journalctl" cfg.logProcessor.logSource) "systemd-journald.service";
-      wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service";
+      wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service"
+        ++ lib.optional cfg.database.enable "postgresql.service";
+      requires = lib.optional cfg.database.enable "postgresql.service";
 
       serviceConfig = {
         Type = "simple";
         DynamicUser = true;
 
-        # Grant access to systemd journal if using journalctl
-        SupplementaryGroups = lib.optional (lib.hasPrefix "cmd:journalctl" cfg.logProcessor.logSource) "systemd-journal";
+        # Grant access to systemd journal if using journalctl and postgres for database
+        SupplementaryGroups =
+          lib.optional (lib.hasPrefix "cmd:journalctl" cfg.logProcessor.logSource) "systemd-journal"
+          ++ lib.optional cfg.database.enable "postgres";
 
         ExecStart = let
           args = lib.concatStringsSep " " ([
@@ -220,6 +296,9 @@ in {
             "--log-source '${cfg.logProcessor.logSource}'"
             "--nats-url '${cfg.nats.url}'"
             "--nats-subject '${cfg.nats.subject}'"
+            "--database-url '${databaseUrl}'"
+          ] ++ lib.optionals (cfg.database.passwordFile != null) [
+            "--database-password-file '${cfg.database.passwordFile}'"
           ] ++ lib.optionals (cfg.dnsdist.apiUrl != null) [
             "--dnsdist-api-url '${cfg.dnsdist.apiUrl}'"
           ] ++ lib.optionals cfg.logProcessor.skipDnsdistCheck [
@@ -252,24 +331,36 @@ in {
       description = "DNS Smart Block Queue Processor";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ]
-        ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service";
-      wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service";
+        ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service"
+        ++ lib.optional cfg.database.enable "postgresql.service";
+      wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service"
+        ++ lib.optional cfg.database.enable "postgresql.service";
+      requires = lib.optional cfg.database.enable "postgresql.service";
 
       serviceConfig = {
         Type = "simple";
         DynamicUser = true;
+
+        # Grant postgres group membership for peer auth
+        SupplementaryGroups = lib.optional cfg.database.enable "postgres";
 
         ExecStart = let
           args = lib.concatStringsSep " " ([
             "${cfg.package}/bin/dns-smart-block-queue-processor"
             "--nats-url '${cfg.nats.url}'"
             "--nats-subject '${cfg.nats.subject}'"
+            "--database-url '${databaseUrl}'"
+            "--classifier-path '${cfg.package}/bin/dns-smart-block-classifier'"
             "--ollama-url '${cfg.ollama.url}'"
             "--ollama-model '${cfg.ollama.model}'"
             "--prompt-template '${promptTemplate}'"
+            "--classification-type '${cfg.classifier.type}'"
             "--http-timeout-sec ${toString cfg.queueProcessor.httpTimeoutSec}"
             "--http-max-kb ${toString cfg.queueProcessor.httpMaxKb}"
             "--min-confidence ${toString cfg.queueProcessor.minConfidence}"
+            "--classification-ttl-days ${toString cfg.classifier.ttlDays}"
+          ] ++ lib.optionals (cfg.database.passwordFile != null) [
+            "--database-password-file '${cfg.database.passwordFile}'"
           ] ++ lib.optionals (cfg.dnsdist.apiUrl != null) [
             "--dnsdist-api-url '${cfg.dnsdist.apiUrl}'"
           ]);

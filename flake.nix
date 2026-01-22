@@ -22,7 +22,7 @@
       overlays = overlays;
     };
 
-    # Development shell packages
+    # Development shell packages.
     devPackages = pkgs: let
       rust = pkgs.rust-bin.stable.latest.default.override {
         extensions = [
@@ -46,7 +46,7 @@
         buildInputs = devPackages (pkgsFor system);
         shellHook = ''
           echo "DNS Smart Block development environment"
-          echo "Available packages: worker, log-processor, queue-processor"
+          echo "Available packages: classifier, log-processor, queue-processor"
         '';
       };
     });
@@ -60,7 +60,7 @@
       };
     in {
       # Individual packages
-      worker = dnsSmartBlock.worker;
+      classifier = dnsSmartBlock.classifier;
       log-processor = dnsSmartBlock.log-processor;
       queue-processor = dnsSmartBlock.queue-processor;
 
@@ -69,16 +69,16 @@
     });
 
     overlays.default = final: prev: {
-      dns-smart-block-worker = self.packages.${final.system}.worker;
+      dns-smart-block-classifier = self.packages.${final.system}.classifier;
       dns-smart-block-log-processor = self.packages.${final.system}.log-processor;
       dns-smart-block-queue-processor = self.packages.${final.system}.queue-processor;
     };
 
     # Apps for easy running
     apps = forAllSystems (system: {
-      worker = {
+      classifier = {
         type = "app";
-        program = "${self.packages.${system}.worker}/bin/dns-smart-block-worker";
+        program = "${self.packages.${system}.classifier}/bin/dns-smart-block-classifier";
       };
       log-processor = {
         type = "app";

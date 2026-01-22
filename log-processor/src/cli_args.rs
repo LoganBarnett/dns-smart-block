@@ -18,6 +18,14 @@ pub struct CliArgs {
   #[arg(long, env = "NATS_SUBJECT", default_value = "dns.domains")]
   pub nats_subject: String,
 
+  /// PostgreSQL connection URL (without password if using password file)
+  #[arg(long, env = "DATABASE_URL")]
+  pub database_url: String,
+
+  /// Path to file containing database password
+  #[arg(long, env = "DATABASE_PASSWORD_FILE")]
+  pub database_password_file: Option<PathBuf>,
+
   /// dnsdist API URL (to check if domain is already blocked)
   #[arg(long, env = "DNSDIST_API_URL")]
   pub dnsdist_api_url: Option<String>,

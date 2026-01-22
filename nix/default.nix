@@ -61,10 +61,10 @@ let
 in
 {
   # Individual package derivations
-  worker = craneLib.buildPackage (commonArgs // {
-    pname = "dns-smart-block-worker";
+  classifier = craneLib.buildPackage (commonArgs // {
+    pname = "dns-smart-block-classifier";
     version = "0.1.0";
-    cargoExtraArgs = "--package dns-smart-block-worker";
+    cargoExtraArgs = "--package dns-smart-block-classifier";
 
     # Install bundled prompt templates
     postInstall = ''
@@ -73,7 +73,7 @@ in
     '';
 
     meta = with lib; {
-      description = "DNS Smart Block Worker - Fetches and classifies domains using LLM";
+      description = "DNS Smart Block Classifier - Fetches and classifies domains using LLM";
       homepage = "https://github.com/yourusername/dns-smart-block";
       license = licenses.mit;
       maintainers = [ ];
@@ -111,9 +111,9 @@ in
     name = "dns-smart-block-all";
     paths = [
       (lib.getExe' craneLib.buildPackage (commonArgs // {
-        pname = "dns-smart-block-worker";
-        cargoExtraArgs = "--package dns-smart-block-worker";
-      }) "dns-smart-block-worker")
+        pname = "dns-smart-block-classifier";
+        cargoExtraArgs = "--package dns-smart-block-classifier";
+      }) "dns-smart-block-classifier")
       (lib.getExe' craneLib.buildPackage (commonArgs // {
         pname = "dns-smart-block-log-processor";
         cargoExtraArgs = "--package dns-smart-block-log-processor";

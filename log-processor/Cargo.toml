@@ -23,8 +23,11 @@ async-nats = "0.33"
 regex = "*"
 notify = "6"
 chrono = "*"
-base64ct = "1.6"
+base64ct = { workspace = true }
+sqlx = { workspace = true }
+url = "*"
 
 [dev-dependencies]
 wiremock = "0.5"
 tokio-test = "*"
+tempfile = "*"

@@ -1,9 +1,10 @@
 use clap::Parser;
 use dns_smart_block_log_processor::{
-  ProcessorError, Result, cli_args::CliArgs, dnsdist::DnsdistClient,
-  log_parser::LogParser, log_source::LogSource, queue::QueuePublisher,
+  ProcessorError, Result, cli_args::CliArgs, database_url::{construct_database_url, sanitize_database_url},
+  db, dnsdist::DnsdistClient, log_parser::LogParser, log_source::LogSource, queue::QueuePublisher,
 };
 use futures::StreamExt;
+use sqlx::PgPool;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -25,6 +26,19 @@ async fn main() -> Result<()> {
   info!("Log source: {}", args.log_source);
   info!("NATS URL: {}", args.nats_url);
   info!("NATS subject: {}", args.nats_subject);
+
+  // Construct database URL with password if provided
+  let database_url = construct_database_url(
+    &args.database_url,
+    args.database_password_file.as_deref(),
+  )?;
+
+  info!("Database URL: {}", sanitize_database_url(&database_url));
+
+  // Connect to PostgreSQL
+  info!("Connecting to PostgreSQL...");
+  let pool = PgPool::connect(&database_url).await?;
+  info!("Connected to PostgreSQL successfully");
 
   // Initialize components
   let parser = LogParser::new()?;
@@ -80,6 +94,27 @@ async fn main() -> Result<()> {
 
           info!("Found domain in log: {}", domain);
 
+          // Check if domain should be queued based on event history
+          match db::should_queue_domain(&pool, &domain).await {
+            Ok(false) => {
+              info!(
+                "Domain {} already queued/classified/in-progress, skipping",
+                domain
+              );
+              seen.insert(domain);
+              continue;
+            }
+            Ok(true) => {
+              info!("Domain {} should be queued", domain);
+            }
+            Err(e) => {
+              warn!(
+                "Failed to check domain {} status in database: {}. Will queue anyway.",
+                domain, e
+              );
+            }
+          }
+
           // Check if domain is already blocked in dnsdist (if configured)
           if let Some(ref client) = dnsdist_client {
             match client.is_domain_blocked(&domain).await {
@@ -89,7 +124,7 @@ async fn main() -> Result<()> {
                 continue;
               }
               Ok(false) => {
-                info!("Domain {} is not blocked, adding to queue", domain);
+                info!("Domain {} is not blocked in dnsdist", domain);
               }
               Err(e) => {
                 warn!(
@@ -98,6 +133,15 @@ async fn main() -> Result<()> {
                 );
               }
             }
+          }
+
+          // Insert queued event
+          if let Err(e) = db::insert_queued_event(&pool, &domain).await {
+            error!(
+              "Failed to insert queued event for {}: {}",
+              domain, e
+            );
+            // Continue anyway - queue the domain
           }
 
           // Publish to queue

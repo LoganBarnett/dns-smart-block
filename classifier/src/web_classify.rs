@@ -1,9 +1,9 @@
-use crate::error::WorkerError;
+use crate::error::ClassifierError;
 use reqwest::redirect::Policy;
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::info;
 
 #[derive(Serialize, Debug)]
 pub struct SiteMetadata {
@@ -27,7 +27,7 @@ pub async fn fetch_domain(
   domain: &str,
   timeout_sec: u64,
   max_kb: usize,
-) -> Result<(String, u16), WorkerError> {
+) -> Result<(String, u16), ClassifierError> {
   info!("Fetching domain: {}", domain);
 
   let client = reqwest::Client::builder()
@@ -107,7 +107,7 @@ pub fn extract_metadata(
   domain: &str,
   html: &str,
   status: u16,
-) -> Result<SiteMetadata, WorkerError> {
+) -> Result<SiteMetadata, ClassifierError> {
   info!("Extracting metadata from HTML");
   let document = Html::parse_document(html);
   let title = text_from_css_selector(&document, "title");

@@ -1,5 +1,5 @@
-use dns_smart_block_worker::{
-    classify_with_llm, web_classify::SiteMetadata, ClassificationResult, OllamaResponse,
+use dns_smart_block_classifier::{
+    classify_with_llm, output::Classification, web_classify::SiteMetadata, OllamaResponse,
 };
 use serde_json::json;
 use wiremock::{
@@ -68,7 +68,7 @@ async fn test_classify_gaming_site_with_mock_ollama() {
     let mock_server = MockServer::start().await;
 
     // Create the expected classification result
-    let expected_result = ClassificationResult {
+    let expected_result = Classification {
         is_matching_site: true,
         confidence: 0.95,
     };
@@ -185,7 +185,7 @@ async fn test_ollama_api_error_handling() {
 
 #[test]
 fn test_gaming_site_html_parsing() {
-    use dns_smart_block_worker::web_classify::extract_metadata;
+    use dns_smart_block_classifier::web_classify::extract_metadata;
 
     let metadata = extract_metadata("awesomegames.example", GAMING_SITE_HTML, 200)
         .expect("Should extract metadata");
