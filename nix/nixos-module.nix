@@ -51,18 +51,12 @@ in {
 
       logSource = mkOption {
         type = types.str;
-        default = "cmd:journalctl -f -u dnsdist";
+        default = "cmd:journalctl -f -u dns-server";
         description = ''
           Log source to watch. Can be:
-          - A file path: /var/log/dnsdist.log
-          - A command: cmd:journalctl -f -u dnsdist
+          - A file path: /var/log/dns.log
+          - A command: cmd:journalctl -f -u dns-server
         '';
-      };
-
-      skipDnsdistCheck = mkOption {
-        type = types.bool;
-        default = false;
-        description = "Skip checking dnsdist for already-blocked domains";
       };
     };
 
@@ -108,20 +102,18 @@ in {
       };
     };
 
-    # dnsdist Configuration
-    dnsdist = {
-      apiUrl = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        example = "http://localhost:8080";
-        description = "dnsdist API URL for checking/blocking domains";
+    # Blocklist Server Configuration
+    blocklistServer = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Enable HTTP blocklist server for serving DNS blocklists";
       };
 
-      apiKeyFile = mkOption {
-        type = types.nullOr types.path;
-        default = null;
-        example = "/run/secrets/dnsdist-api-key";
-        description = "Path to file containing dnsdist API key";
+      bindAddress = mkOption {
+        type = types.str;
+        default = "127.0.0.1:3000";
+        description = "Address and port to bind the blocklist server to";
       };
     };
 
@@ -299,10 +291,6 @@ in {
             "--database-url '${databaseUrl}'"
           ] ++ lib.optionals (cfg.database.passwordFile != null) [
             "--database-password-file '${cfg.database.passwordFile}'"
-          ] ++ lib.optionals (cfg.dnsdist.apiUrl != null) [
-            "--dnsdist-api-url '${cfg.dnsdist.apiUrl}'"
-          ] ++ lib.optionals cfg.logProcessor.skipDnsdistCheck [
-            "--skip-dnsdist-check"
           ]);
         in args;
 
@@ -321,8 +309,6 @@ in {
 
       environment = {
         RUST_LOG = "info";
-      } // lib.optionalAttrs (cfg.dnsdist.apiKeyFile != null) {
-        DNSDIST_API_KEY = "$(cat ${cfg.dnsdist.apiKeyFile})";
       };
     };
 
@@ -361,8 +347,6 @@ in {
             "--classification-ttl-days ${toString cfg.classifier.ttlDays}"
           ] ++ lib.optionals (cfg.database.passwordFile != null) [
             "--database-password-file '${cfg.database.passwordFile}'"
-          ] ++ lib.optionals (cfg.dnsdist.apiUrl != null) [
-            "--dnsdist-api-url '${cfg.dnsdist.apiUrl}'"
           ]);
         in args;
 
@@ -381,8 +365,47 @@ in {
 
       environment = {
         RUST_LOG = "info";
-      } // lib.optionalAttrs (cfg.dnsdist.apiKeyFile != null) {
-        DNSDIST_API_KEY = "$(cat ${cfg.dnsdist.apiKeyFile})";
+      };
+    };
+
+    # Blocklist Server Service
+    systemd.services.dns-smart-block-blocklist-server = mkIf cfg.blocklistServer.enable {
+      description = "DNS Smart Block Blocklist Server";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ]
+        ++ lib.optional cfg.database.enable "postgresql.service";
+      wants = lib.optional cfg.database.enable "postgresql.service";
+      requires = lib.optional cfg.database.enable "postgresql.service";
+
+      serviceConfig = {
+        Type = "simple";
+        DynamicUser = true;
+
+        # Grant postgres group membership for peer auth
+        SupplementaryGroups = lib.optional cfg.database.enable "postgres";
+
+        ExecStart = let
+          args = lib.concatStringsSep " " ([
+            "${cfg.package}/bin/dns-smart-block-blocklist-server"
+            "--database-url '${databaseUrl}'"
+            "--bind-address '${cfg.blocklistServer.bindAddress}'"
+          ] ++ lib.optionals (cfg.database.passwordFile != null) [
+            "--database-password-file '${cfg.database.passwordFile}'"
+          ]);
+        in args;
+
+        Restart = "always";
+        RestartSec = "5s";
+
+        # Security hardening
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+      };
+
+      environment = {
+        RUST_LOG = "info";
       };
     };
 
@@ -404,9 +427,6 @@ in {
 
     warnings =
       lib.optional (!cfg.nats.enable && cfg.nats.url == "nats://localhost:${toString cfg.nats.port}")
-        "DNS Smart Block: Built-in NATS is disabled but no external NATS URL configured"
-      ++
-      lib.optional (cfg.dnsdist.apiUrl == null)
-        "DNS Smart Block: No dnsdist API URL configured - blocking functionality will be limited";
+        "DNS Smart Block: Built-in NATS is disabled but no external NATS URL configured";
   });
 }

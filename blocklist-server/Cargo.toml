@@ -1,0 +1,21 @@
+[package]
+name = "dns-smart-block-blocklist-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "*", features = ["full"] }
+axum = "0.7"
+tower = "*"
+tower-http = { version = "*", features = ["trace", "cors"] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+sqlx = { workspace = true }
+chrono = "*"
+serde = { version = "*", features = ["derive"] }
+clap = { version = "*", features = ["derive", "env"] }
+url = "*"
+thiserror = "*"
+
+[dev-dependencies]
+axum-test = "*"

@@ -1,12 +1,7 @@
 use dns_smart_block_log_processor::{
-    dnsdist::DnsdistClient, log_parser::LogParser, log_source::LogSource,
+    log_parser::LogParser, log_source::LogSource,
 };
 use futures::StreamExt;
-use serde_json::json;
-use wiremock::{
-    matchers::{method, path},
-    Mock, MockServer, ResponseTemplate,
-};
 
 /// Sample DNS log lines in various formats
 const SAMPLE_DNS_LOGS: &[&str] = &[
@@ -58,54 +53,6 @@ async fn test_log_source_command_stream() {
     } else {
         panic!("Expected to read a line from command");
     }
-}
-
-#[tokio::test]
-async fn test_dnsdist_client_checks_blocked_domains() {
-    // Set up mock dnsdist server
-    let mock_server = MockServer::start().await;
-
-    // Mock response that indicates gaming-site.com is in the block list
-    Mock::given(method("GET"))
-        .and(path("/api/v1/servers/localhost/zones"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "zones": [
-                {
-                    "name": "gaming-site.com",
-                    "kind": "Native"
-                }
-            ]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let client = DnsdistClient::new(mock_server.uri(), None);
-
-    // Check if gaming-site.com is blocked
-    let is_blocked = client.is_domain_blocked("gaming-site.com").await.unwrap();
-    assert!(is_blocked, "gaming-site.com should be detected as blocked");
-
-    // Check if another domain is blocked
-    let is_blocked = client.is_domain_blocked("news-site.com").await.unwrap();
-    assert!(!is_blocked, "news-site.com should not be detected as blocked (not in response)");
-}
-
-#[tokio::test]
-async fn test_dnsdist_client_handles_api_errors() {
-    // Set up mock dnsdist server that returns errors
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/api/v1/servers/localhost/zones"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&mock_server)
-        .await;
-
-    let client = DnsdistClient::new(mock_server.uri(), None);
-
-    // Should return false (not blocked) when API fails, allowing system to continue
-    let is_blocked = client.is_domain_blocked("test-domain.com").await.unwrap();
-    assert!(!is_blocked, "Should return false when API fails");
 }
 
 #[tokio::test]
@@ -178,30 +125,6 @@ async fn test_case_insensitive_domain_extraction() {
     // All should be normalized to lowercase
     assert_eq!(domains.len(), 3);
     assert!(domains.iter().all(|d| d == "example.com"));
-}
-
-#[tokio::test]
-async fn test_dnsdist_client_with_api_key() {
-    let mock_server = MockServer::start().await;
-
-    // Mock that expects API key in header
-    Mock::given(method("GET"))
-        .and(path("/api/v1/servers/localhost/zones"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "zones": []
-        })))
-        .expect(1)
-        .mount(&mock_server)
-        .await;
-
-    let client = DnsdistClient::new(
-        mock_server.uri(),
-        Some("test-api-key".to_string()),
-    );
-
-    let _result = client.is_domain_blocked("test.com").await;
-
-    // Verify the mock was called (expectation is checked on drop)
 }
 
 #[test]

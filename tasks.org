@@ -1,0 +1,182 @@
+#+title: DNS Smart Block - Tasks
+#+date: <2026-01-22 Wed>
+
+* Tasks
+
+** DONE Implement database password file security
+CLOSED: [2026-01-22 Wed]
+
+- Added --database-password-file CLI argument with environment variable support
+- Created database_url module in both log-processor and queue-processor
+- Implemented construct_database_url() function to read password from file
+- Implemented sanitize_database_url() function to redact passwords in logs
+- Added error handling for file I/O and URL parsing
+- Fixed Unix socket URL handling (URLs that can't be parsed by url crate)
+- Updated both binaries to use secure URL construction and sanitized logging
+- All tests passing (41 total)
+
+** DONE Remove dnsdist-specific code
+CLOSED: [2026-01-22 Wed]
+
+- Removed dnsdist module from log-processor
+- Removed dnsdist CLI arguments (--dnsdist-api-url, --dnsdist-api-key, --skip-dnsdist-check)
+- Removed dnsdist client initialization and blocking checks
+- Removed 3 dnsdist-related integration tests
+- Removed wiremock imports for dnsdist mocking
+
+** DONE Create blocklist-server component
+CLOSED: [2026-01-22 Wed]
+
+- Created new blocklist-server package with Axum web framework
+- Implemented GET /blocklist endpoint with query parameters:
+  - type (required): classification type (gaming, news, sports, etc.)
+  - at (optional): ISO 8601 timestamp for point-in-time queries
+- Implemented GET /health endpoint for health checks
+- Plain text output format (one domain per line)
+- Created database query function get_blocked_domains()
+- Time-based filtering using valid_on and valid_until fields
+- Added 3 comprehensive integration tests (marked #[ignore], require DATABASE_URL):
+  - test_get_blocked_domains_at_current_time
+  - test_get_blocked_domains_excludes_expired
+  - test_get_blocked_domains_at_specific_time
+- Added blocklist-server to workspace members in Cargo.toml
+
+** DONE Update NixOS module to remove dnsdist
+CLOSED: [2026-01-22 Wed]
+
+- Removed dnsdist configuration section from nix/nixos-module.nix
+- Replaced with blocklistServer configuration options
+- Updated log processor default log source from dnsdist to generic dns-server
+- Removed dnsdist CLI arguments from log-processor service
+- Removed dnsdist CLI arguments from queue-processor service
+- Removed dnsdist environment variables from both services
+- Added new blocklist-server systemd service with security hardening
+- Removed dnsdist API URL warning from assertions
+
+** DONE Update README documentation
+CLOSED: [2026-01-22 Wed]
+
+- Completely rewrote README.org to be DNS-agnostic
+- Removed all dnsdist-specific references and examples
+- Added comprehensive "DNS Server Integration" section
+- Documented integration with 6 different DNS servers:
+  - Blocky (direct HTTP URL support)
+  - dnsmasq (download and convert format)
+  - BIND (download and convert format)
+  - Unbound (download and convert format)
+  - Pi-hole (direct HTTP URL support)
+  - AdGuard Home (direct HTTP URL support)
+- Updated architecture diagram to show blocklist server
+- Added full API documentation for /blocklist endpoint
+- Updated NixOS configuration examples to include blocklistServer options
+- Added database schema documentation
+
+** DONE Add blocklist-server to Nix derivations
+CLOSED: [2026-01-22 Wed]
+
+- Added blocklist-server package derivation to nix/default.nix
+- Added blocklist-server to the combined "all" package
+- Added blocklist-server to flake.nix packages
+- Added blocklist-server to flake overlays
+- Added blocklist-server app definition for nix run
+- Updated dev shell message to show blocklist-server
+
+
+** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - parallel node overlap
+
+One will notice some of the parallel nodes have an extra bar just sitting
+there.  Reducing the size of the label doesn't seem to help, as everything
+just gets bunched up more when the nodes are rebalanced.  We'll want to get
+a minimal example going.
+
+** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - \n
+
+If you want to break up long labels, the generally accepted way to do
+things is via the ~\n~ character in ~d2~.  However in the ASCII renderer,
+this just prints a line break and the rendering engine is totally unaware
+of this.  This makes for broken rendering, and it's extra apparent when
+nodes are parallel.
+
+Make a minimal reproduction before filing.
+
+** DONE [#C] Implement two Rust projects: A log-processor and a worker
+CLOSED: [2026-01-22 Thu 15:04]
+
+This is mostly just cargo gymnastics.  But any build machinery we produce
+should also be aware of this.  There might also be merit in a shared
+library.
+
+** DONE [#C] Provide ideal setup
+CLOSED: [2026-01-22 Thu 15:04]
+
+Show how various systems that are not part of this project can be wired
+together to achieve the ultimately desired result.  This can be via NixOS
+services, and for the time being others can deconstruct that to suite their
+own configurations.  The fortunate thing about a NixOS setup is that it
+lays all of the chips on the table, so while it won't be executable for
+those not using NixOS, it will be explicit enough that anyone can duplicate
+it.
+
+The ideal setup consists of NATS for the queue and ~dnsdist~ for the DNS
+server.
+
+** DONE [#B] Lay out project structure for worker
+CLOSED: [2026-01-22 Thu 15:04]
+
+** KILL [#B] Worker does ~whois~
+CLOSED: [2025-11-18 Tue 14:17]
+
+~whois~ is now considered dated.  ~RDAP~ is the new hotness (and can be
+used via the ~rdap~ tool), but even that is pretty meaningless for our
+purposes, as nothing useful is published to them.
+
+** DONE [#B] Worker does GET, follows redirect, extracts meta + text
+CLOSED: [2026-01-22 Thu 15:04]
+** DONE [#B] Worker sends result to LLM
+CLOSED: [2026-01-22 Thu 15:04]
+** DONE [#B] Worker sends block to ~dnsdist~
+CLOSED: [2026-01-22 Thu 15:04]
+** DONE [#A] Manually test block via ~dnsdist~ API call
+CLOSED: [2026-01-22 Thu 15:04]
+
+** KILL [#A] Manually test ~whois~
+CLOSED: [2025-11-17 Mon 18:34]
+
+TLDR;  This was to test LLM behavior but then it turned into "How do I
+get useful information out of ~WHOIS~ / ~RDAP~?" and the answer is "you
+can't anymore/ever".
+
+** DONE [#A] Manually test LLM behavior
+CLOSED: [2025-11-18 Tue 14:17]
+
+Let's come up with a few test sites in order to prove this out.  For our
+topic in question, we'll use gaming sites.  A gaming site is a site that is
+either about games, a platform for playing games, a platform that could be
+used to play games, a place in which game discussions occur, game news
+sites, and so on.
+
+We want a few domains that represent:
+1.  Sites that are obviously gaming sites under this criteria.
+2.  Sites that are dubiously gaming sites.
+3.  Sites that are obviously _not_ gaming sites.
+4.  Sites that _could_ be used to host gaming discussions but aren't really
+   meant for it (like Reddit).  At some point we have to draw a line and say
+   that it's a social media platform and should be blocked as such rather
+   than a gaming site, even if it hosts gaming content.
+
+Obvious gaming sites:
+1.  ign.com
+2.  twitch.tv
+
+Dubious gaming sites:
+1.  discord.com
+2.  robertsspaceindustries.com (Star Citizen)
+
+Obviously not gaming sites:
+1.  khanacademy.org
+2.  npr.org
+
+General purpose platforms that could host gaming material but aren't
+dedicated to the purpose:
+1.  reddit.com
+2.  facebook.com

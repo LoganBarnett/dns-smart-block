@@ -1,7 +1,7 @@
 use clap::Parser;
 use dns_smart_block_log_processor::{
   ProcessorError, Result, cli_args::CliArgs, database_url::{construct_database_url, sanitize_database_url},
-  db, dnsdist::DnsdistClient, log_parser::LogParser, log_source::LogSource, queue::QueuePublisher,
+  db, log_parser::LogParser, log_source::LogSource, queue::QueuePublisher,
 };
 use futures::StreamExt;
 use sqlx::PgPool;
@@ -44,22 +44,6 @@ async fn main() -> Result<()> {
   let parser = LogParser::new()?;
   let queue =
     QueuePublisher::new(&args.nats_url, args.nats_subject.clone()).await?;
-
-  let dnsdist_client = if let Some(ref url) = args.dnsdist_api_url {
-    if args.skip_dnsdist_check {
-      info!("dnsdist API URL provided but checks are disabled");
-      None
-    } else {
-      info!("Initializing dnsdist client with URL: {}", url);
-      Some(DnsdistClient::new(
-        url.clone(),
-        args.dnsdist_api_key.clone(),
-      ))
-    }
-  } else {
-    info!("No dnsdist API URL provided, will queue all domains");
-    None
-  };
 
   // Track seen domains to avoid duplicate processing
   let seen_domains: Arc<Mutex<HashSet<String>>> =
@@ -112,26 +96,6 @@ async fn main() -> Result<()> {
                 "Failed to check domain {} status in database: {}. Will queue anyway.",
                 domain, e
               );
-            }
-          }
-
-          // Check if domain is already blocked in dnsdist (if configured)
-          if let Some(ref client) = dnsdist_client {
-            match client.is_domain_blocked(&domain).await {
-              Ok(true) => {
-                info!("Domain {} is already blocked, skipping queue", domain);
-                seen.insert(domain);
-                continue;
-              }
-              Ok(false) => {
-                info!("Domain {} is not blocked in dnsdist", domain);
-              }
-              Err(e) => {
-                warn!(
-                  "Failed to check if domain {} is blocked: {}. Will queue anyway.",
-                  domain, e
-                );
-              }
             }
           }
 

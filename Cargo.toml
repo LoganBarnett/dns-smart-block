@@ -1,5 +1,5 @@
 [workspace]
-members = ["classifier", "log-processor", "queue-processor"]
+members = ["classifier", "log-processor", "queue-processor", "blocklist-server"]
 resolver = "2"
 
 [workspace.dependencies]

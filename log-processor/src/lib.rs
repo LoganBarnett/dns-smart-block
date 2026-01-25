@@ -1,7 +1,6 @@
 pub mod cli_args;
 pub mod database_url;
 pub mod db;
-pub mod dnsdist;
 pub mod log_parser;
 pub mod log_source;
 pub mod queue;

@@ -30,13 +30,13 @@ let
   };
 
   # Common build inputs needed by all packages
-  commonBuildInputs = with pkgs; [
-    pkg-config
-    openssl
+  commonBuildInputs = [
+    pkgs.pkg-config
+    pkgs.openssl
   ];
 
-  commonNativeBuildInputs = with pkgs; [
-    pkg-config
+  commonNativeBuildInputs = [
+    pkgs.pkg-config
   ];
 
   # Build dependencies only (for caching)
@@ -72,10 +72,10 @@ in
       cp ${../prompts}/*.txt $out/share/dns-smart-block/prompts/
     '';
 
-    meta = with lib; {
+    meta = {
       description = "DNS Smart Block Classifier - Fetches and classifies domains using LLM";
       homepage = "https://github.com/yourusername/dns-smart-block";
-      license = licenses.mit;
+      license = lib.licenses.mit;
       maintainers = [ ];
     };
   });
@@ -85,10 +85,10 @@ in
     version = "0.1.0";
     cargoExtraArgs = "--package dns-smart-block-log-processor";
 
-    meta = with lib; {
+    meta = {
       description = "DNS Smart Block Log Processor - Watches DNS logs and queues domains";
       homepage = "https://github.com/yourusername/dns-smart-block";
-      license = licenses.mit;
+      license = lib.licenses.mit;
       maintainers = [ ];
     };
   });
@@ -98,10 +98,23 @@ in
     version = "0.1.0";
     cargoExtraArgs = "--package dns-smart-block-queue-processor";
 
-    meta = with lib; {
+    meta = {
       description = "DNS Smart Block Queue Processor - Processes domains from NATS queue";
       homepage = "https://github.com/yourusername/dns-smart-block";
-      license = licenses.mit;
+      license = lib.licenses.mit;
+      maintainers = [ ];
+    };
+  });
+
+  blocklist-server = craneLib.buildPackage (commonArgs // {
+    pname = "dns-smart-block-blocklist-server";
+    version = "0.1.0";
+    cargoExtraArgs = "--package dns-smart-block-blocklist-server";
+
+    meta = {
+      description = "DNS Smart Block Blocklist Server - HTTP API for serving DNS blocklists";
+      homepage = "https://github.com/yourusername/dns-smart-block";
+      license = lib.licenses.mit;
       maintainers = [ ];
     };
   });
@@ -113,6 +126,10 @@ in
       (lib.getExe' craneLib.buildPackage (commonArgs // {
         pname = "dns-smart-block-classifier";
         cargoExtraArgs = "--package dns-smart-block-classifier";
+        postInstall = ''
+          mkdir -p $out/share/dns-smart-block/prompts
+          cp ${../prompts}/*.txt $out/share/dns-smart-block/prompts/
+        '';
       }) "dns-smart-block-classifier")
       (lib.getExe' craneLib.buildPackage (commonArgs // {
         pname = "dns-smart-block-log-processor";
@@ -122,6 +139,10 @@ in
         pname = "dns-smart-block-queue-processor";
         cargoExtraArgs = "--package dns-smart-block-queue-processor";
       }) "dns-smart-block-queue-processor")
+      (lib.getExe' craneLib.buildPackage (commonArgs // {
+        pname = "dns-smart-block-blocklist-server";
+        cargoExtraArgs = "--package dns-smart-block-blocklist-server";
+      }) "dns-smart-block-blocklist-server")
     ];
   };
 }

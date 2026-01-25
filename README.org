@@ -17,100 +17,285 @@ The system watches DNS logs, queues domain lookups, fetches content from those
 domains, and uses an LLM to classify whether they match categories you're
 interested in blocking.
 
-The system uses ~dnsdist~ as the DNS server.  ~dnsdist~ is a dynamic DNS server
-that allows adding blocked domains via API without restarts or reloads.  This
-makes it ideal for real-time, LLM-driven blocking decisions.
+The system is DNS-server agnostic and can work with any DNS server that
+supports blocklists.  Blocked domains are served via a web API that outputs
+plain text blocklists compatible with most DNS servers (Blocky, dnsmasq, BIND,
+Unbound, AdGuard Home, Pi-hole, etc.).
 
-DNS Smart Block consists of two main components:
+DNS Smart Block consists of three main components:
 
-1. *Log Processor* - Watches ~dnsdist~ logs and enqueues domains that appear in
-   DNS requests.  When a DNS lookup occurs, it's written to the log, and the log
-   processor adds it to the work queue.
+1. *Log Processor* - Watches DNS server logs and enqueues domains that appear
+   in DNS requests.  When a DNS lookup occurs, it's written to the log, and
+   the log processor adds it to the work queue.
 
-2. *Worker* - Consumes domains from the queue, fetches data from each domain
-   (HTTP GET with redirect following), and feeds the content to an LLM.  The LLM
-   classifies the site based on your interested categories.  If the site
-   matches, the worker updates ~dnsdist~'s block list via its API.
+2. *Queue Processor* - Consumes domains from the queue, fetches data from each
+   domain (HTTP GET with redirect following), and feeds the content to an LLM.
+   The LLM classifies the site based on your interested categories.  If the
+   site matches, the classification is stored in the database.
+
+3. *Blocklist Server* - Web API that serves DNS blocklists from the database.
+   Your DNS server periodically fetches the blocklist via HTTP to stay
+   up-to-date with newly classified domains.
 
 So the DNS request and queue flow looks like this:
 
 #+begin_src d2 :results verbatim :exports results
 initial_query: "DNS client sends query"
-dnsdist_handle: "dnsdist handles request"
+dns_handle: "DNS server handles request"
 
 direction: down
 
 parallel_flows: {
   grid-gap: 4
-  dnsdist_to_upstream: "dnsdist forwards to upstream"
+  dns_to_upstream: "DNS server forwards to upstream"
 
-  dnsdist_log: "dnsdist logs request"
+  dns_log: "DNS server logs request"
   log_processor: "log processor enqueues domain"
-  worker_http: "worker fetches HTTP"
-  worker_llm: "worker queries LLM"
-  worker_dnsdist_update: "worker updates dnsdist"
+  queue_processor: "queue processor fetches & classifies"
+  database: "classification stored in database"
+  blocklist_server: "blocklist server serves via HTTP"
+  dns_reload: "DNS server fetches updated blocklist"
 
-  dnsdist_log -> log_processor -> worker_http -> worker_llm -> worker_dnsdist_update
+  dns_log -> log_processor -> queue_processor -> database -> blocklist_server -> dns_reload
 }
 
-initial_query --> dnsdist_handle
-dnsdist_handle -> parallel_flows.dnsdist_to_upstream
-dnsdist_handle -> parallel_flows.dnsdist_log
+initial_query --> dns_handle
+dns_handle -> parallel_flows.dns_to_upstream
+dns_handle -> parallel_flows.dns_log
 #+end_src
 
 #+RESULTS:
 #+begin_example
-                     ┌───────────────────────┐
-                     │DNS client sends query │
-                     │                       │
-                     └───────────────────────┘
-                                │
-                                ▼
-                     ┌────────────────────────┐
-                     │dnsdist handles request │
-                     │                        │
-                     └────────────────────────┘
-                            │      │
-                            │      └────────┐
-                            │               │
- ┌──────────────────────────│───────────────│──────────────────┐
- │                       parallel_flows     │                  │
- │                          ▼               ▼                  │
- │    ┌───────────────────────────┌─────────────────────┐      │
- │    │dnsdist forwards to upstrea│dnsdist logs request │      │
- │    │                           │ │                   │      │
- │    └───────────────────────────└─────────────────────┘      │
- │                                          │                  │
- │                                          ▼                  │
- │                            ┌──────────────────────────────┐ │
- │                            │log processor enqueues domain │ │
- │                            │                              │ │
- │                            └──────────────────────────────┘ │
- │                                          │                  │
- │                                          ▼                  │
- │                                ┌────────────────────┐       │
- │                                │worker fetches HTTP │       │
- │                                │                    │       │
- │                                └────────────────────┘       │
- │                                          │                  │
- │                                          ▼                  │
- │                                 ┌───────────────────┐       │
- │                                 │worker queries LLM │       │
- │                                 │                   │       │
- │                                 └───────────────────┘       │
- │                                          │                  │
- │                                          ▼                  │
- │                               ┌───────────────────────┐     │
- │                               │worker updates dnsdist │     │
- │                               │                       │     │
- │                               └───────────────────────┘     │
- │                                                             │
- └─────────────────────────────────────────────────────────────┘
+                        ┌───────────────────────┐
+                        │DNS client sends query │
+                        │                       │
+                        └───────────────────────┘
+                                  │
+                                  ▼
+                      ┌───────────────────────────┐
+                      │DNS server handles request │
+                      │                           │
+                      └───────────────────────────┘
+                              │       │
+                              │       └─────────┐
+                              │                 │
+ ┌────────────────────────────│─────────────────│──────────────────┐
+ │                         parallel_flows       │                  │
+ │                            ▼                 ▼                  │
+ │    ┌──────────────────────────────┌────────────────────────┐    │
+ │    │DNS server forwards to upstrea│DNS server logs request │    │
+ │    │                              │ │                      │    │
+ │    └──────────────────────────────└────────────────────────┘    │
+ │                                              │                  │
+ │                                              ▼                  │
+ │                                ┌──────────────────────────────┐ │
+ │                                │log processor enqueues domain │ │
+ │                                │                              │ │
+ │                                └──────────────────────────────┘ │
+ │                                              │                  │
+ │                                              ▼                  │
+ │                               ┌─────────────────────────────────────┐
+ │                               │queue processor fetches & classifies │
+ │                               │                                 │   │
+ │                               └─────────────────────────────────────┘
+ │                                              │                  │
+ │                                              ▼                  │
+ │                                ┌──────────────────────────────────┐
+ │                                │classification stored in database │
+ │                                │                                │ │
+ │                                └──────────────────────────────────┘
+ │                                              │                  │
+ │                                              ▼                  │
+ │                                ┌─────────────────────────────────┐
+ │                                │blocklist server serves via HTTP││
+ │                                │                                ││
+ │                                └─────────────────────────────────┘
+ │                                              │                  │
+ │                                              ▼                  │
+ │                              ┌─────────────────────────────────────┐
+ │                              │DNS server fetches updated blocklist │
+ │                              │                                  │  │
+ │                              └─────────────────────────────────────┘
+ │                                                                 │
+ └─────────────────────────────────────────────────────────────────┘
 #+end_example
 
-* Host Configuration
+* Components
 
-This section covers how to deploy and configure DNS Smart Block on your host system.
+** Log Processor
+
+Watches DNS server logs and queues domains for classification.
+
+*** Features
+- Watches log files or command output (e.g., ~journalctl~)
+- Parses multiple DNS log formats
+- Deduplicates domains in memory
+- Checks database to avoid re-queuing already classified domains
+- Publishes to NATS queue
+
+*** Usage
+#+begin_src sh :exports code
+dns-smart-block-log-processor \
+  --log-source "cmd:journalctl -f -u dns-server" \
+  --nats-url "nats://localhost:4222" \
+  --database-url "postgresql://user@localhost/dns_smart_block" \
+  --database-password-file "/run/secrets/db-password"
+#+end_src
+
+** Queue Processor
+
+Processes queued domains: fetches content, classifies with LLM, stores results.
+
+*** Features
+- Consumes from NATS queue
+- Runs classifier as subprocess for isolation
+- Stores classifications with TTL (configurable, default 10 days)
+- Event-sourced database design (immutable event log)
+- Confidence threshold filtering
+
+*** Usage
+#+begin_src sh :exports code
+dns-smart-block-queue-processor \
+  --nats-url "nats://localhost:4222" \
+  --database-url "postgresql://user@localhost/dns_smart_block" \
+  --database-password-file "/run/secrets/db-password" \
+  --classifier-path "dns-smart-block-classifier" \
+  --ollama-url "http://localhost:11434" \
+  --ollama-model "llama2" \
+  --prompt-template "./prompts/gaming-classifier.txt" \
+  --classification-type "gaming" \
+  --min-confidence 0.8 \
+  --classification-ttl-days 10
+#+end_src
+
+** Blocklist Server
+
+HTTP API for serving DNS blocklists.
+
+*** Features
+- Plain text output (one domain per line)
+- Filter by classification type (gaming, news, sports, etc.)
+- Point-in-time queries via ~at~ parameter
+- Compatible with any DNS server that supports HTTP blocklists
+
+*** Usage
+#+begin_src sh :exports code
+dns-smart-block-blocklist-server \
+  --database-url "postgresql://user@localhost/dns_smart_block" \
+  --database-password-file "/run/secrets/db-password" \
+  --bind-address "0.0.0.0:3000"
+#+end_src
+
+*** API Endpoints
+
+**** GET /blocklist
+
+Query parameters:
+- ~type~ (required): Classification type (e.g., "gaming", "news", "sports")
+- ~at~ (optional): ISO 8601 timestamp for historical queries (defaults to now)
+
+Examples:
+#+begin_src sh :exports code
+# Current gaming blocklist
+curl "http://localhost:3000/blocklist?type=gaming"
+
+# Historical query (what was blocked at specific time)
+curl "http://localhost:3000/blocklist?type=gaming&at=2025-01-22T10:00:00Z"
+
+# Sports blocklist
+curl "http://localhost:3000/blocklist?type=sports"
+#+end_src
+
+Output format (plain text, one domain per line):
+#+begin_example
+example-gaming-site.com
+another-game-site.net
+gaming-platform.org
+#+end_example
+
+**** GET /health
+
+Health check endpoint.
+
+** Classifier
+
+Standalone binary that fetches a domain and classifies it using an LLM.
+
+*** Features
+- HTTP GET with redirect following
+- HTML metadata extraction (title, description, Open Graph tags)
+- LLM classification via Ollama
+- JSON output for machine parsing
+- Semantic error types
+- Prompt hash computation for deduplication
+
+*** Usage
+#+begin_src sh :exports code
+dns-smart-block-classifier \
+  --domain "example.com" \
+  --ollama-url "http://localhost:11434" \
+  --ollama-model "llama2" \
+  --prompt-template "./prompts/gaming-classifier.txt" \
+  --output json
+#+end_src
+
+* DNS Server Integration
+
+The blocklist server provides plain text output compatible with most DNS servers.
+
+** Blocky
+
+#+begin_src yaml :exports code
+blocking:
+  denylists:
+    gaming:
+      - http://localhost:3000/blocklist?type=gaming
+    news:
+      - http://localhost:3000/blocklist?type=news
+#+end_src
+
+** dnsmasq
+
+#+begin_src sh :exports code
+# Download and convert to dnsmasq format
+curl "http://localhost:3000/blocklist?type=gaming" | \
+  awk '{print "address=/"$1"/"}' > /etc/dnsmasq.d/gaming-blocklist.conf
+
+# Reload dnsmasq
+systemctl reload dnsmasq
+#+end_src
+
+** BIND
+
+#+begin_src sh :exports code
+# Download and convert to BIND format
+curl "http://localhost:3000/blocklist?type=gaming" | \
+  awk '{print "zone \""$1"\" { type master; file \"/etc/bind/null.zone\"; };"}' \
+  > /etc/bind/gaming-blocklist.conf
+
+# Reload BIND
+rndc reload
+#+end_src
+
+** Unbound
+
+#+begin_src sh :exports code
+# Download and convert to Unbound format
+curl "http://localhost:3000/blocklist?type=gaming" | \
+  awk '{print "local-zone: \""$1"\" static"}' > /etc/unbound/gaming-blocklist.conf
+
+# Reload Unbound
+unbound-control reload
+#+end_src
+
+** Pi-hole / AdGuard Home
+
+These DNS servers support direct HTTP blocklist URLs:
+
+- Pi-hole: Add ~http://localhost:3000/blocklist?type=gaming~ to blocklists
+- AdGuard Home: Add to DNS blocklists in settings
+
+* Host Configuration
 
 ** Nix / NixOS
 
@@ -133,8 +318,8 @@ Add to your NixOS flake configuration:
           services.dns-smart-block = {
             enable = true;
 
-            # Watch dnsdist logs via journalctl
-            logProcessor.logSource = "cmd:journalctl -f -u dnsdist";
+            # Watch DNS server logs via journalctl
+            logProcessor.logSource = "cmd:journalctl -f -u dns-server";
 
             # LLM configuration
             ollama.url = "http://localhost:11434";
@@ -142,6 +327,10 @@ Add to your NixOS flake configuration:
 
             # Use the bundled gaming classifier
             classifier.preset = "gaming";
+
+            # Blocklist server
+            blocklistServer.enable = true;
+            blocklistServer.bindAddress = "0.0.0.0:3000";
           };
         }
       ];
@@ -156,35 +345,16 @@ The NixOS module provides:
 
 - *Built-in NATS server* - Dedicated instance that won't conflict with
   other NATS services
-- *Systemd services* - Automatically configured log-processor and
-  queue-processor
+- *Built-in PostgreSQL* - Automatic database setup with peer authentication
+- *Systemd services* - Automatically configured log-processor, queue-processor,
+  and blocklist-server
 - *Security hardening* - Services run as DynamicUser with restricted
   permissions
 - *Proper permissions* - Log-processor gets =systemd-journal= group for
   reading logs
 - *Flexible log sources* - Support for both journalctl and file-based
   log watching
-- *Secret management* - Compatible with agenix, sops-nix for API keys
-
-*** NATS Isolation
-
-The built-in NATS server is isolated to avoid conflicts:
-
-- Configurable port (default: 4222)
-- Separate data directory: =/var/lib/dns-smart-block-nats=
-- Unique subject: =dns.smart-block.domains=
-- Can be disabled to use external NATS
-
-*** Permissions
-
-When using =cmd:journalctl -f -u dnsdist=:
-- Service automatically gets =systemd-journal= supplementary group
-- Can read dnsdist logs without root privileges
-- Works with dnsdist's journald integration
-
-When using file-based log source:
-- Service gets read-only access to specified file path
-- No special privileges needed
+- *Secret management* - Compatible with agenix, sops-nix for passwords
 
 *** Configuration Options
 
@@ -198,26 +368,26 @@ services.dns-smart-block = {
   # NATS configuration
   nats.enable = true;              # Use built-in NATS
   nats.port = 4222;                # Port (change if conflicts)
-  nats.subject = "dns.smart-block.domains";
+
+  # Database
+  database.enable = true;          # Use built-in PostgreSQL
+  database.passwordFile = "/run/secrets/db-password";
 
   # Log processor
   logProcessor.enable = true;
-  logProcessor.logSource = "cmd:journalctl -f -u dnsdist";
-  logProcessor.skipDnsdistCheck = false;
+  logProcessor.logSource = "cmd:journalctl -f -u dns-server";
 
   # Queue processor
   queueProcessor.enable = true;
   queueProcessor.minConfidence = 0.8;    # 0.0 to 1.0
-  queueProcessor.httpTimeoutSec = 10;
-  queueProcessor.httpMaxKb = 100;
+
+  # Blocklist server
+  blocklistServer.enable = true;
+  blocklistServer.bindAddress = "0.0.0.0:3000";
 
   # Ollama LLM
   ollama.url = "http://localhost:11434";
   ollama.model = "llama2";
-
-  # dnsdist API (optional)
-  dnsdist.apiUrl = "http://localhost:8080";
-  dnsdist.apiKeyFile = "/run/secrets/dnsdist-api-key";
 
   # Classifier - use bundled preset or custom template
   classifier.preset = "gaming";        # Use bundled gaming classifier
@@ -233,605 +403,64 @@ Check service status:
 systemctl status dns-smart-block-nats
 systemctl status dns-smart-block-log-processor
 systemctl status dns-smart-block-queue-processor
+systemctl status dns-smart-block-blocklist-server
 
 # View logs
 journalctl -f -u dns-smart-block-*
 #+end_src
 
-*** Documentation
+* Database
 
-For complete documentation, see:
-- =nix/MODULE.org= - Comprehensive module documentation
-- =nix/module-example.nix= - Working example configuration
-- =nix/SUMMARY.org= - Quick reference guide
+DNS Smart Block uses PostgreSQL with an event-sourced architecture.
 
-* Tasks
+** Tables
 
-** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - parallel node overlap
+- *prompts* - Stores LLM prompts with SHA256 hash deduplication
+- *domain_classification_events* - Immutable event log (queued, classifying, classified, error)
+- *domains* - Projection table for fast domain lookups
+- *domain_classifications* - Classification results with TTL (valid_on, valid_until)
 
-One will notice some of the parallel nodes have an extra bar just sitting
-there.  Reducing the size of the label doesn't seem to help, as everything
-just gets bunched up more when the nodes are rebalanced.  We'll want to get
-a minimal example going.
+** Migrations
 
-** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - \n
+Migrations are automatically run by the queue-processor on startup.
 
-If you want to break up long labels, the generally accepted way to do
-things is via the ~\n~ character in ~d2~.  However in the ASCII renderer,
-this just prints a line break and the rendering engine is totally unaware
-of this.  This makes for broken rendering, and it's extra apparent when
-nodes are parallel.
-
-Make a minimal reproduction before filing.
-
-** TODO [#C] Implement two Rust projects: A log-processor and a worker
-
-This is mostly just cargo gymnastics.  But any build machinery we produce
-should also be aware of this.  There might also be merit in a shared
-library.
-
-** TODO [#C] Provide ideal setup
-
-Show how various systems that are not part of this project can be wired
-together to achieve the ultimately desired result.  This can be via NixOS
-services, and for the time being others can deconstruct that to suite their
-own configurations.  The fortunate thing about a NixOS setup is that it
-lays all of the chips on the table, so while it won't be executable for
-those not using NixOS, it will be explicit enough that anyone can duplicate
-it.
-
-The ideal setup consists of NATS for the queue and ~dnsdist~ for the DNS
-server.
-
-** TODO [#B] Lay out project structure for worker
-
-** KILL [#B] Worker does ~whois~
-CLOSED: [2025-11-18 Tue 14:17]
-
-~whois~ is now considered dated.  ~RDAP~ is the new hotness (and can be
-used via the ~rdap~ tool), but even that is pretty meaningless for our
-purposes, as nothing useful is published to them.
-
-** TODO [#B] Worker does GET, follows redirect, extracts meta + text
-** TODO [#B] Worker sends result to LLM
-** TODO [#B] Worker sends block to ~dnsdist~
-** TODO [#A] Manually test block via ~dnsdist~ API call
-** KILL [#A] Manually test ~whois~
-CLOSED: [2025-11-17 Mon 18:34]
-
-TLDR;  This was to test LLM behavior but then it turned into "How do I
-get useful information out of ~WHOIS~ / ~RDAP~?" and the answer is "you
-can't anymore/ever".
-
------
-
-
-First let's do a ~whois~:
-
-#+begin_src sh :results output :exports both
-whois ign.com
+Manual migration:
+#+begin_src sh :exports code
+sqlx migrate run --database-url "postgresql://user@localhost/dns_smart_block"
 #+end_src
 
-#+RESULTS:
-#+begin_example
-   Domain Name: IGN.COM
-   Registry Domain ID: 4168959_DOMAIN_COM-VRSN
-   Registrar WHOIS Server: whois.corporatedomains.com
-   Registrar URL: http://cscdbs.com
-   Updated Date: 2022-08-17T12:11:35Z
-   Creation Date: 1998-07-25T04:00:00Z
-   Registry Expiry Date: 2031-07-24T04:00:00Z
-   Registrar: CSC Corporate Domains, Inc.
-   Registrar IANA ID: 299
-   Registrar Abuse Contact Email: domainabuse@cscglobal.com
-   Registrar Abuse Contact Phone: 8887802723
-   Domain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited
-   Name Server: NS-1421.AWSDNS-49.ORG
-   Name Server: NS-1639.AWSDNS-12.CO.UK
-   Name Server: NS-184.AWSDNS-23.COM
-   Name Server: NS-865.AWSDNS-44.NET
-   DNSSEC: unsigned
-   URL of the ICANN Whois Inaccuracy Complaint Form: https://www.icann.org/wicf/
->>> Last update of whois database: 2025-11-18T02:14:36Z <<<
+* Development
 
-For more information on Whois status codes, please visit https://icann.org/epp
+** Building
 
-NOTICE: The expiration date displayed in this record is the date the
-registrar's sponsorship of the domain name registration in the registry is
-currently set to expire.  This date does not necessarily reflect the expiration
-date of the domain name registrant's agreement with the sponsoring
-registrar.  Users may consult the sponsoring registrar's Whois database to
-view the registrar's reported date of expiration for this registration.
+#+begin_src sh :exports code
+# Build all components
+cargo build --release
 
-TERMS OF USE: You are not authorized to access or query our Whois
-database through the use of electronic processes that are high-volume and
-automated except as reasonably necessary to register domain names or
-modify existing registrations; the Data in VeriSign Global Registry
-Services' ("VeriSign") Whois database is provided by VeriSign for
-information purposes only, and to assist persons in obtaining information
-about or related to a domain name registration record.  VeriSign does not
-guarantee its accuracy.  By submitting a Whois query, you agree to abide
-by the following terms of use: You agree that you may use this Data only
-for lawful purposes and that under no circumstances will you use this Data
-to: (1) allow, enable, or otherwise support the transmission of mass
-unsolicited, commercial advertising or solicitations via e-mail, telephone,
-or facsimile; or (2) enable high volume, automated, electronic processes
-that apply to VeriSign (or its computer systems).  The compilation,
-repackaging, dissemination or other use of this Data is expressly
-prohibited without the prior written consent of VeriSign.  You agree not to
-use electronic processes that are automated and high-volume to access or
-query the Whois database except as reasonably necessary to register
-domain names or modify existing registrations.  VeriSign reserves the right
-to restrict your access to the Whois database in its sole discretion to ensure
-operational stability.  VeriSign may restrict or terminate your access to the
-Whois database for failure to abide by these terms of use.  VeriSign
-reserves the right to modify these terms at any time.
-
-The Registry database contains ONLY .COM, .NET, .EDU domains and
-Registrars.
-#+end_example
-
-I guess ~rdap~ is the new hotness.  Let's do that:
-
-#+begin_src sh :results output :exports both
-rdap --server https://rdap.verisign.com/com/v1 ign.com
+# Build specific component
+cargo build --release -p dns-smart-block-log-processor
+cargo build --release -p dns-smart-block-queue-processor
+cargo build --release -p dns-smart-block-classifier
+cargo build --release -p dns-smart-block-blocklist-server
 #+end_src
 
-#+RESULTS:
-#+begin_example
-Domain:
-  Domain Name: IGN.COM
-  Handle: 4168959_DOMAIN_COM-VRSN
-  Status: client transfer prohibited
-  Conformance: rdap_level_0
-  Conformance: icann_rdap_technical_implementation_guide_1
-  Conformance: icann_rdap_response_profile_1
-  Notice:
-    Title: Terms of Service
-    Description: Service subject to Terms of Use.
-    Link: https://www.verisign.com/domain-names/registration-data-access-protocol/terms-service/index.xhtml
-  Notice:
-    Title: Status Codes
-    Description: For more information on domain status codes, please visit https://icann.org/epp
-    Link: https://icann.org/epp
-  Notice:
-    Title: RDDS Inaccuracy Complaint Form
-    Description: URL of the ICANN RDDS Inaccuracy Complaint Form: https://icann.org/wicf
-    Link: https://icann.org/wicf
-  Link: https://rdap.verisign.com/com/v1/domain/IGN.COM
-  Link: https://rdap.cscglobal.com/dbs/rdap-api/v1/domain/IGN.COM
-  Event:
-    Action: registration
-    Date: 1998-07-25T04:00:00Z
-  Event:
-    Action: expiration
-    Date: 2031-07-24T04:00:00Z
-  Event:
-    Action: last changed
-    Date: 2022-08-17T12:11:35Z
-  Event:
-    Action: last update of RDAP database
-    Date: 2025-11-18T02:33:53Z
-  Secure DNS:
-    Delegation Signed: false
-  Entity:
-    Handle: 299
-    Public ID:
-      Type: IANA Registrar ID
-      Identifier: 299
-    Link: http://cscdbs.com
-    Role: registrar
-    vCard version: 4.0
-    vCard fn: CSC Corporate Domains, Inc.
-    Entity:
-      Role: abuse
-      vCard version: 4.0
-      vCard tel: tel:8887802723
-      vCard email: domainabuse@cscglobal.com
-  Nameserver:
-    Nameserver: NS-1421.AWSDNS-49.ORG
-  Nameserver:
-    Nameserver: NS-1639.AWSDNS-12.CO.UK
-  Nameserver:
-    Nameserver: NS-184.AWSDNS-23.COM
-  Nameserver:
-    Nameserver: NS-865.AWSDNS-44.NET
-#+end_example
+** Testing
 
-Okay this is pretty useless.  Let's kill it.
+#+begin_src sh :exports code
+# Run all tests
+cargo test --all
 
-** DONE [#A] Manually test LLM behavior
-CLOSED: [2025-11-18 Tue 14:17]
-
-Let's come up with a few test sites in order to prove this out.  For our
-topic in question, we'll use gaming sites.  A gaming site is a site that is
-either about games, a platform for playing games, a platform that could be
-used to play games, a place in which game discussions occur, game news
-sites, and so on.
-
-We want a few domains that represent:
-1.  Sites that are obviously gaming sites under this criteria.
-2.  Sites that are dubiously gaming sites.
-3.  Sites that are obviously _not_ gaming sites.
-4.  Sites that _could_ be used to host gaming discussions but aren't really
-   meant for it (like Reddit).  At some point we have to draw a line and say
-   that it's a social media platform and should be blocked as such rather
-   than a gaming site, even if it hosts gaming content.
-
-Obvious gaming sites:
-1.  ign.com
-2.  twitch.tv
-
-Dubious gaming sites:
-1.  discord.com
-2.  robertsspaceindustries.com (Star Citizen)
-
-Obviously not gaming sites:
-1.  khanacademy.org
-2.  npr.org
-
-General purpose platforms that could host gaming material but aren't
-dedicated to the purpose:
-1.  reddit.com
-2.  facebook.com
-
-
-#+begin_src sh :results output :exports both
-# IGN apparently doesn't like anyone just sending a curl at them.
-# The nerve!  Apparently they haven't heard of Roko's Basilisk...
-curl \
-  --location \
-  --silent \
-  --show-error \
-  --user-agent 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
-AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15' \
-  --header 'Accept: text/html,application/xhtml+xml,\
-application/xml;q=0.9,*/*;q=0.8' \
-  --header 'Accept-Language: en-US,en;q=0.9' \
-  --compressed \
-  --fail-with-body \
-  --max-time 15 \
-  https://ign.com \
-  | htmlq \
-      --attribute content \
-      'meta[name="description"],meta[property="og:description"]' \
-  | uniq
+# Run with database tests (requires PostgreSQL)
+DATABASE_URL="postgresql://localhost/dns_smart_block_test" \
+  cargo test --all -- --ignored
 #+end_src
 
-#+RESULTS:
-: IGN is your #1 destination for all video game news, expert reviews,
-: and walkthroughs.
-: IGN is your #1 destination for all video game news, expert reviews,
-: and walkthroughs.
+** Nix Development Shell
 
-
-Alright, I asked ChatGPT 5.1 nicely and it gave me a wonderfully detailed
-prompt to use:
-
-#+name: prompt-template
-#+begin_src text
-You are a strict JSON-only classifier.
-
-Your task:
-- Decide whether a given website is a "gaming site" under the following rules.
-- Then output ONLY a JSON object with two fields:
-  - "is_gaming_site": a boolean
-  - "confidence": a number between 0 and 1 (decimals allowed)
-
-DEFINITION OF "GAMING SITE"
-
-A site SHOULD be classified as a gaming site ("is_gaming_site": true) if
-its PRIMARY purpose is one or more of:
-
-1.  Being about games:
-   - Video game news, reviews, previews, guides, walkthroughs.
-   - Information or media focused mainly on games.
-
-2.  Being a platform for playing or distributing games:
-   - Hosts playable games directly in the browser or via downloads.
-   - Launchers, portals, or catalogs for playing or acquiring games.
-   - Examples that SHOULD be TRUE:
-     - scratch.mit.edu (learn-to-code via interactive projects and
-       games)
-     - newgrounds.com (hosts lots of browser games and game-like
-       content)
-
-3.  Being a platform specifically aimed at game creation or game mods:
-   - Game engines, asset stores, or tools whose primary branding is
-     around game development.
-
-4.  Being a site primarily about game-related community or esports:
-   - Forums, wikis, or news sites dedicated mainly to specific games or
-     gaming communities.
-
-A site SHOULD NOT be classified as a gaming site ("is_gaming_site":
-false) if:
-
-1.  It is a general-purpose social network, chat platform, or content
-   host whose main purpose is NOT specifically gaming, even if it has a
-   lot of game content.
-   - Examples that SHOULD be FALSE:
-     - reddit.com (general social/forum platform)
-     - facebook.com (general social network)
-     - discord.com (general chat/communities, not solely gaming)
-     - youtube.com (general video platform)
-
-2.  It is obviously about something else:
-   - News, banking, education, general tech, streaming for all topics,
-     etc., with gaming only as a minor or incidental category.
-
-3.  The provided information is too vague or generic to clearly
-   indicate a primary gaming focus.  In that case, be conservative and
-   answer false with a lower confidence.
-
-INPUT FORMAT
-
-You will receive a single JSON object describing the site.  It will
-always include:
-- "domain": the domain name as a string.
-- At least one free-text field with descriptive text, for example:
-  - "summary", "description", "title", "meta_description",
-    "og_description", etc.
-
-The JSON may include MORE fields in the future.  Treat all string fields
-as possible clues about the site's purpose.  Ignore fields you do not
-understand; do NOT fail because of unknown fields.
-
-IMPORTANT OUTPUT RULES
-
-- Output MUST be valid JSON.
-- Output MUST have exactly these two fields at the top level:
-  - "is_gaming_site": boolean
-  - "confidence": number between 0 and 1
-- Do NOT include any extra text, comments, or explanations outside the
-  JSON.
-- Do NOT wrap the JSON in backticks.
-
-EXAMPLES
-
-Example 1
-Input:
-{
-  "domain": "ign.com",
-  "summary": "IGN is your #1 destination for all video game news,\
- expert reviews, and walkthroughs."
-}
-Output:
-{ "is_gaming_site": true, "confidence": 0.99 }
-
-Example 2
-Input:
-{
-  "domain": "scratch.mit.edu",
-  "summary": "Scratch is a block-based visual programming language\
- and online community for creating and sharing interactive media such as\
- stories, games, and animations."
-}
-Output:
-{ "is_gaming_site": true, "confidence": 0.85 }
-
-Example 3
-Input:
-{
-  "domain": "newgrounds.com",
-  "summary": "Newgrounds is an online entertainment website and\
- community featuring user-made games, movies, art and audio."
-}
-Output:
-{ "is_gaming_site": true, "confidence": 0.9 }
-
-Example 4
-Input:
-{
-  "domain": "reddit.com",
-  "summary": "Reddit is a network of communities where people can dive\
- into their interests, hobbies and passions."
-}
-Output:
-{ "is_gaming_site": false, "confidence": 0.9 }
-
-Example 5
-Input:
-{
-  "domain": "khanacademy.org",
-  "summary": "Khan Academy is a nonprofit organization with the\
- mission to provide a free, world-class education for anyone, anywhere."
-}
-Output:
-{ "is_gaming_site": false, "confidence": 0.99 }
-
-NOW CLASSIFY THIS SITE
-
-Input:
-{{INPUT_JSON}}
-
-Output:
-
+#+begin_src sh :exports code
+nix develop
 #+end_src
 
-Let's substitute:
+* License
 
-#+name: prompt
-#+begin_src sh :results output :exports both :noweb yes
-domain='ign.com'
-description='IGN is your #1 destination for all video game news, \
-expert reviews, and walkthroughs.'
-sed \
-  "s/{{INPUT_JSON}}/{ \"domain\": \"${domain}\", \
-\"description\": \"${description}\" }/" \
-  <<'EOF'
-<<prompt-template>>
-EOF
-#+end_src
-
-#+RESULTS:
-#+begin_example
-You are a strict JSON-only classifier.
-
-Your task:
-- Decide whether a given website is a "gaming site" under the following rules.
-- Then output ONLY a JSON object with two fields:
-  - "is_gaming_site": a boolean
-  - "confidence": a number between 0 and 1 (decimals allowed)
-
-DEFINITION OF "GAMING SITE"
-
-A site SHOULD be classified as a gaming site ("is_gaming_site": true) if
-its PRIMARY purpose is one or more of:
-
-1.  Being about games:
-   - Video game news, reviews, previews, guides, walkthroughs.
-   - Information or media focused mainly on games.
-
-2.  Being a platform for playing or distributing games:
-   - Hosts playable games directly in the browser or via downloads.
-   - Launchers, portals, or catalogs for playing or acquiring games.
-   - Examples that SHOULD be TRUE:
-     - scratch.mit.edu (learn-to-code via interactive projects and
-       games)
-     - newgrounds.com (hosts lots of browser games and game-like
-       content)
-
-3.  Being a platform specifically aimed at game creation or game mods:
-   - Game engines, asset stores, or tools whose primary branding is
-     around game development.
-
-4.  Being a site primarily about game-related community or esports:
-   - Forums, wikis, or news sites dedicated mainly to specific games or
-     gaming communities.
-
-A site SHOULD NOT be classified as a gaming site ("is_gaming_site":
-false) if:
-
-1.  It is a general-purpose social network, chat platform, or content
-   host whose main purpose is NOT specifically gaming, even if it has a
-   lot of game content.
-   - Examples that SHOULD be FALSE:
-     - reddit.com (general social/forum platform)
-     - facebook.com (general social network)
-     - discord.com (general chat/communities, not solely gaming)
-     - youtube.com (general video platform)
-
-2.  It is obviously about something else:
-   - News, banking, education, general tech, streaming for all topics,
-     etc., with gaming only as a minor or incidental category.
-
-3.  The provided information is too vague or generic to clearly
-   indicate a primary gaming focus.  In that case, be conservative and
-   answer false with a lower confidence.
-
-INPUT FORMAT
-
-You will receive a single JSON object describing the site.  It will
-always include:
-- "domain": the domain name as a string.
-- At least one free-text field with descriptive text, for example:
-  - "summary", "description", "title", "meta_description",
-    "og_description", etc.
-
-The JSON may include MORE fields in the future.  Treat all string fields
-as possible clues about the site's purpose.  Ignore fields you do not
-understand; do NOT fail because of unknown fields.
-
-IMPORTANT OUTPUT RULES
-
-- Output MUST be valid JSON.
-- Output MUST have exactly these two fields at the top level:
-  - "is_gaming_site": boolean
-  - "confidence": number between 0 and 1
-- Do NOT include any extra text, comments, or explanations outside the
-  JSON.
-- Do NOT wrap the JSON in backticks.
-
-EXAMPLES
-
-Example 1
-Input:
-{
-  "domain": "ign.com",
-  "summary": "IGN is your #1 destination for all video game news,\
- expert reviews, and walkthroughs."
-}
-Output:
-{ "is_gaming_site": true, "confidence": 0.99 }
-
-Example 2
-Input:
-{
-  "domain": "scratch.mit.edu",
-  "summary": "Scratch is a block-based visual programming language\
- and online community for creating and sharing interactive media such as\
- stories, games, and animations."
-}
-Output:
-{ "is_gaming_site": true, "confidence": 0.85 }
-
-Example 3
-Input:
-{
-  "domain": "newgrounds.com",
-  "summary": "Newgrounds is an online entertainment website and\
- community featuring user-made games, movies, art and audio."
-}
-Output:
-{ "is_gaming_site": true, "confidence": 0.9 }
-
-Example 4
-Input:
-{
-  "domain": "reddit.com",
-  "summary": "Reddit is a network of communities where people can dive\
- into their interests, hobbies and passions."
-}
-Output:
-{ "is_gaming_site": false, "confidence": 0.9 }
-
-Example 5
-Input:
-{
-  "domain": "khanacademy.org",
-  "summary": "Khan Academy is a nonprofit organization with the\
- mission to provide a free, world-class education for anyone, anywhere."
-}
-Output:
-{ "is_gaming_site": false, "confidence": 0.99 }
-
-NOW CLASSIFY THIS SITE
-
-Input:
-{ "domain": "ign.com", "description": "IGN is your #1 destination for all video game news, expert reviews, and walkthroughs." }
-
-Output:
-
-#+end_example
-
-And finally the test:
-
-#+begin_src sh :results output :exports both :noweb yes
-full_prompt="$(cat <<'EOF'
-<<prompt()>>
-EOF
-)"
-export full_prompt
-
-export model='qwen3:8b'
-jq \
-  --null-input \
-  '{ model: $ENV.model, prompt: $ENV.full_prompt, format: "json", \
-stream: false}' \
-    2>&1 \
-  | curl \
-    --location \
-    --silent \
-    --header "Content-Type: application/json" \
-    --request POST \
-    --data @- \
-    "http://M-CL64PK702X.proton:11434/api/generate" \
-    2>&1 \
-  | jq '.response'
-echo $?
-#+end_src
-
-#+RESULTS:
-: "{\n\n\n  \"is_gaming_site\": true,\n  \"confidence\": 0.99\n}"
-: 0
+[Your license here]

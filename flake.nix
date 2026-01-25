@@ -46,7 +46,7 @@
         buildInputs = devPackages (pkgsFor system);
         shellHook = ''
           echo "DNS Smart Block development environment"
-          echo "Available packages: classifier, log-processor, queue-processor"
+          echo "Available packages: classifier, log-processor, queue-processor, blocklist-server"
         '';
       };
     });
@@ -63,6 +63,7 @@
       classifier = dnsSmartBlock.classifier;
       log-processor = dnsSmartBlock.log-processor;
       queue-processor = dnsSmartBlock.queue-processor;
+      blocklist-server = dnsSmartBlock.blocklist-server;
 
       # Default to building all
       default = dnsSmartBlock.all;
@@ -72,6 +73,7 @@
       dns-smart-block-classifier = self.packages.${final.system}.classifier;
       dns-smart-block-log-processor = self.packages.${final.system}.log-processor;
       dns-smart-block-queue-processor = self.packages.${final.system}.queue-processor;
+      dns-smart-block-blocklist-server = self.packages.${final.system}.blocklist-server;
     };
 
     # Apps for easy running
@@ -87,6 +89,10 @@
       queue-processor = {
         type = "app";
         program = "${self.packages.${system}.queue-processor}/bin/dns-smart-block-queue-processor";
+      };
+      blocklist-server = {
+        type = "app";
+        program = "${self.packages.${system}.blocklist-server}/bin/dns-smart-block-blocklist-server";
       };
     });
 

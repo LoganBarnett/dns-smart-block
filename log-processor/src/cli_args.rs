@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[command(about = "Watches DNS logs and queues domains for classification")]
 pub struct CliArgs {
   /// Log source: either a file path or a command to run (prefix with 'cmd:')
-  /// Examples: '/var/log/dnsdist.log' or 'cmd:journalctl -f -u dnsdist'
+  /// Examples: '/var/log/dns.log' or 'cmd:journalctl -f -u dns-server'
   #[arg(long, env = "LOG_SOURCE")]
   pub log_source: String,
 
@@ -25,18 +25,6 @@ pub struct CliArgs {
   /// Path to file containing database password
   #[arg(long, env = "DATABASE_PASSWORD_FILE")]
   pub database_password_file: Option<PathBuf>,
-
-  /// dnsdist API URL (to check if domain is already blocked)
-  #[arg(long, env = "DNSDIST_API_URL")]
-  pub dnsdist_api_url: Option<String>,
-
-  /// dnsdist API key for authentication
-  #[arg(long, env = "DNSDIST_API_KEY")]
-  pub dnsdist_api_key: Option<String>,
-
-  /// Skip dnsdist check (always queue domains even if potentially blocked)
-  #[arg(long, env = "SKIP_DNSDIST_CHECK", default_value = "false")]
-  pub skip_dnsdist_check: bool,
 }
 
 impl CliArgs {
