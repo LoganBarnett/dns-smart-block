@@ -3,7 +3,7 @@ use reqwest::redirect::Policy;
 use scraper::{Html, Selector};
 use serde::Serialize;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Serialize, Debug)]
 pub struct SiteMetadata {
@@ -21,6 +21,25 @@ pub struct SiteMetadata {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub language: Option<String>,
   pub http_status: u16,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub fetch_error: Option<String>,
+}
+
+impl SiteMetadata {
+  /// Create minimal metadata for a domain when HTTP fetch fails
+  pub fn from_fetch_error(domain: &str, error: &str) -> Self {
+    Self {
+      domain: domain.to_string(),
+      title: None,
+      description: None,
+      og_title: None,
+      og_description: None,
+      og_site_name: None,
+      language: None,
+      http_status: 0,
+      fetch_error: Some(error.to_string()),
+    }
+  }
 }
 
 pub async fn fetch_domain(
@@ -39,6 +58,7 @@ pub async fn fetch_domain(
        Safari/605.1.15",
     )
     .gzip(true)
+    .danger_accept_invalid_certs(true)
     .build()?;
 
   let url = if domain.starts_with("http://") || domain.starts_with("https://") {
@@ -47,36 +67,66 @@ pub async fn fetch_domain(
     format!("https://{}", domain)
   };
 
-  let response = client
-    .get(&url)
-    .header(
-      "Accept",
-      "text/html,application/xhtml+xml,\
-      application/xml;q=0.9,*/*;q=0.8",
-    )
-    .header("Accept-Language", "en-US,en;q=0.9")
-    .send()
-    .await?;
+  // Retry logic with exponential backoff: 3 attempts with 500ms, 1s, 2s delays
+  let max_attempts = 3;
+  let mut last_error = None;
 
-  let status = response.status().as_u16();
-  info!("HTTP status: {}", status);
+  for attempt in 0..max_attempts {
+    if attempt > 0 {
+      let delay_ms = 500 * (1 << (attempt - 1)); // 500ms, 1000ms, 2000ms
+      warn!(
+        "Retry attempt {} after {}ms delay",
+        attempt + 1,
+        delay_ms
+      );
+      tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
 
-  let max_bytes = max_kb * 1024;
-  let body_bytes = response.bytes().await?;
+    match client
+      .get(&url)
+      .header(
+        "Accept",
+        "text/html,application/xhtml+xml,\
+        application/xml;q=0.9,*/*;q=0.8",
+      )
+      .header("Accept-Language", "en-US,en;q=0.9")
+      .send()
+      .await
+    {
+      Ok(response) => {
+        let status = response.status().as_u16();
+        info!("HTTP status: {} (attempt {})", status, attempt + 1);
 
-  let body = if body_bytes.len() > max_bytes {
-    info!(
-      "Truncating response from {} bytes to {} KB",
-      body_bytes.len(),
-      max_kb
-    );
-    &body_bytes[..max_bytes]
-  } else {
-    &body_bytes[..]
-  };
+        let max_bytes = max_kb * 1024;
+        let body_bytes = response.bytes().await?;
 
-  let html = String::from_utf8_lossy(body).to_string();
-  Ok((html, status))
+        let body = if body_bytes.len() > max_bytes {
+          info!(
+            "Truncating response from {} bytes to {} KB",
+            body_bytes.len(),
+            max_kb
+          );
+          &body_bytes[..max_bytes]
+        } else {
+          &body_bytes[..]
+        };
+
+        let html = String::from_utf8_lossy(body).to_string();
+        return Ok((html, status));
+      }
+      Err(e) => {
+        warn!(
+          "HTTP request failed on attempt {}: {}",
+          attempt + 1,
+          e
+        );
+        last_error = Some(e);
+      }
+    }
+  }
+
+  // All retries exhausted, return the last error
+  Err(last_error.unwrap().into())
 }
 
 pub fn attr_from_css_selector(
@@ -128,5 +178,6 @@ pub fn extract_metadata(
     og_site_name,
     language,
     http_status: status,
+    fetch_error: None,
   })
 }

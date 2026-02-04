@@ -1,0 +1,15 @@
+#!/bin/sh
+# Pre-commit hook for dns-smart-block
+# Runs cargo fmt to ensure all Rust code is properly formatted before committing.
+
+set -e
+
+echo "Running cargo fmt --all --check..."
+cargo fmt --all --check
+
+if [ $? -ne 0 ]; then
+    echo "Error: Code is not formatted. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
+
+echo "✓ All Rust code is properly formatted."

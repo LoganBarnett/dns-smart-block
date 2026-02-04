@@ -25,6 +25,7 @@ let
       (lib.hasSuffix "\.lock" path) ||
       (lib.hasInfix "/src" path) ||
       (lib.hasInfix "/tests" path) ||
+      (lib.hasInfix "/migrations" path) || # For SQLx migration files
       (lib.hasSuffix "\.txt" path) || # For prompt templates
       (craneLib.filterCargoSources path type);
   };
@@ -52,6 +53,11 @@ let
     inherit src cargoArtifacts;
     buildInputs = commonBuildInputs;
     nativeBuildInputs = commonNativeBuildInputs;
+
+    # Disable tests in Nix builds. All tests are integration tests that require
+    # network connectivity (HTTP clients, mock servers, etc.) which is not
+    # available in Nix's sandboxed build environment.
+    doCheck = false;
 
     # Enable optimizations
     CARGO_PROFILE_RELEASE_LTO = "thin";

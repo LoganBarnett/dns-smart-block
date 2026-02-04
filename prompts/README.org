@@ -26,7 +26,32 @@ Classifies gaming-related websites including:
 #+begin_src nix :exports code
 services.dns-smart-block = {
   enable = true;
-  classifier.preset = "gaming";
+  classifiers.gaming.enable = true;
+};
+#+end_src
+
+** video-streaming-classifier.txt
+
+Classifies video streaming platforms including:
+
+- Video streaming services (e.g., YouTube, Netflix, Hulu)
+- Live streaming platforms (e.g., Twitch, Kick)
+- Short-form video platforms (e.g., TikTok)
+- Video hosting and sharing (e.g., Vimeo, Dailymotion)
+
+*Classification Criteria:*
+
+- ~is_matching_site: true~ - Site's PRIMARY purpose is video streaming
+- ~is_matching_site: false~ - General social networks with video support
+  (e.g., Facebook, Instagram), video conferencing (e.g., Zoom), or chat
+  platforms (e.g., Discord)
+
+*Usage in NixOS:*
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  classifiers.video-streaming.enable = true;
 };
 #+end_src
 
@@ -94,10 +119,6 @@ To add a new bundled classifier:
 1. Create ~prompts/your-classifier.txt~ following the template above
 2. Update ~nix/default.nix~ if needed (prompts are auto-copied via
    ~postInstall~)
-3. Add the classifier name to ~nix/nixos-module.nix~:
-
-   #+begin_src nix :exports code
-   type = types.enum [ "gaming" "your-classifier" ];
-   #+end_src
-
+3. Add the classifier configuration to ~nix/nixos-module.nix~ in the
+   ~classifiers~ attrset
 4. Update this README with documentation

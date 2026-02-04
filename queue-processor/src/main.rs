@@ -28,6 +28,10 @@ struct CliArgs {
     #[arg(long, env = "NATS_SUBJECT", default_value = "dns.domains")]
     nats_subject: String,
 
+    /// Maximum number of unacknowledged messages per consumer
+    #[arg(long, env = "NATS_MAX_ACK_PENDING", default_value = "1")]
+    nats_max_ack_pending: i64,
+
     /// PostgreSQL connection URL (without password if using password file)
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
@@ -139,17 +143,26 @@ async fn run_classifier(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    // Read stdout and stderr concurrently
-    let mut stdout_buf = String::new();
-    let mut stderr_buf = String::new();
+    // Read stdout and stderr concurrently (actually concurrent this time)
+    let (stdout_result, stderr_result) = tokio::join!(
+        async {
+            let mut buf = String::new();
+            if let Some(mut stdout) = child.stdout.take() {
+                stdout.read_to_string(&mut buf).await?;
+            }
+            Ok::<String, std::io::Error>(buf)
+        },
+        async {
+            let mut buf = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                stderr.read_to_string(&mut buf).await?;
+            }
+            Ok::<String, std::io::Error>(buf)
+        }
+    );
 
-    if let Some(mut stdout) = child.stdout.take() {
-        stdout.read_to_string(&mut stdout_buf).await?;
-    }
-
-    if let Some(mut stderr) = child.stderr.take() {
-        stderr.read_to_string(&mut stderr_buf).await?;
-    }
+    let stdout_buf = stdout_result?;
+    let stderr_buf = stderr_result?;
 
     let _status = child.wait().await?;
 
@@ -289,8 +302,50 @@ async fn process_domain(
             )
             .await?;
 
-            // Don't propagate error - we've recorded it
-            Ok(())
+            // Determine if this is a permanent or transient error
+            let is_permanent_error = match &e {
+                ProcessorError::ClassifierError(msg) => {
+                    // Check if it's a DNS resolution error, invalid domain, or
+                    // other permanent failure
+                    msg.contains("dns_resolution_failed")
+                        || msg.contains("invalid_domain")
+                        || msg.contains("http_fetch_failed: 404")
+                        || msg.contains("http_fetch_failed: 403")
+                }
+                // Database and I/O errors are generally transient
+                ProcessorError::DatabaseError(_)
+                | ProcessorError::IoError(_)
+                | ProcessorError::SqlxError(_) => false,
+                // Other errors are considered transient
+                _ => false,
+            };
+
+            if is_permanent_error {
+                info!(
+                    "Permanent error for {}, will not retry: {}",
+                    domain, e
+                );
+                return Ok(());
+            }
+
+            // Check consecutive failures
+            let consecutive_errors = db::count_consecutive_errors(pool, domain, 10).await?;
+
+            if consecutive_errors >= 3 {
+                warn!(
+                    "Domain {} has {} consecutive failures, will not retry",
+                    domain, consecutive_errors
+                );
+                // Don't retry - too many failures
+                Ok(())
+            } else {
+                info!(
+                    "Domain {} has {} consecutive failures, will retry",
+                    domain, consecutive_errors
+                );
+                // Propagate error to trigger NAK and retry
+                Err(e)
+            }
         }
     }
 }
@@ -353,18 +408,50 @@ async fn main() -> Result<()> {
 
     info!("Connected to NATS successfully");
 
-    // Subscribe to domain messages
-    info!("Subscribing to subject: {}", args.nats_subject);
-    let mut subscriber = client
-        .subscribe(args.nats_subject.clone())
+    // Get JetStream context
+    let jetstream = async_nats::jetstream::new(client);
+
+    // Create or get a durable consumer for this processor type
+    // Each processor type (gaming, video-streaming) gets its own consumer
+    let consumer_name = format!("dns-smart-block-{}", args.classification_type);
+    info!("Creating JetStream consumer: {}", consumer_name);
+
+    let stream = jetstream
+        .get_stream("DNS_SMART_BLOCK")
         .await
-        .map_err(|e| ProcessorError::NatsError(e.to_string()))?;
+        .map_err(|e| ProcessorError::NatsError(format!("Failed to get stream: {}", e)))?;
 
-    info!("Subscribed successfully, waiting for messages...");
+    let consumer = stream
+        .get_or_create_consumer(
+            &consumer_name,
+            async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(consumer_name.clone()),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                max_ack_pending: args.nats_max_ack_pending,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| ProcessorError::NatsError(format!("Failed to create consumer: {}", e)))?;
 
-    // Process messages
-    while let Some(message) = subscriber.next().await {
-        let payload = message.payload;
+    info!("JetStream consumer created, waiting for messages...");
+
+    // Process messages from JetStream
+    let mut messages = consumer
+        .messages()
+        .await
+        .map_err(|e| ProcessorError::NatsError(format!("Failed to get message stream: {}", e)))?;
+
+    while let Some(message) = messages.next().await {
+        let message = match message {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!("Error receiving message: {}", e);
+                continue;
+            }
+        };
+
+        let payload = message.payload.clone();
 
         // Deserialize domain message
         match serde_json::from_slice::<DomainMessage>(&payload) {
@@ -375,7 +462,7 @@ async fn main() -> Result<()> {
                 );
 
                 // Process the domain
-                if let Err(e) = process_domain(
+                match process_domain(
                     &domain_msg.domain,
                     &args,
                     &pool,
@@ -383,12 +470,28 @@ async fn main() -> Result<()> {
                 )
                 .await
                 {
-                    error!("Error processing domain {}: {}", domain_msg.domain, e);
+                    Ok(_) => {
+                        // Acknowledge the message after successful processing
+                        if let Err(e) = message.ack().await {
+                            error!("Failed to acknowledge message: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error processing domain {}: {}", domain_msg.domain, e);
+                        // Don't acknowledge failed messages - they'll be redelivered
+                        if let Err(nak_err) = message.ack_with(async_nats::jetstream::AckKind::Nak(None)).await {
+                            error!("Failed to NAK message: {}", nak_err);
+                        }
+                    }
                 }
             }
             Err(e) => {
                 error!("Failed to deserialize message: {}", e);
                 warn!("Raw payload: {:?}", String::from_utf8_lossy(&payload));
+                // Acknowledge malformed messages so they don't get redelivered
+                if let Err(ack_err) = message.ack().await {
+                    error!("Failed to acknowledge malformed message: {}", ack_err);
+                }
             }
         }
     }

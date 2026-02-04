@@ -8,6 +8,18 @@ Your task:
 
 DEFINITION OF "GAMING SITE"
 
+Gaming sites are those whose PRIMARY purpose is entertainment and recreation.
+The key question is: Is this designed primarily for fun/entertainment, or
+primarily for structured learning?
+
+INCLUDE sites that are primarily games, even if they teach skills or have
+educational value as a side effect (e.g., Minecraft, Kerbal Space Program,
+Screeps, typing games where competition is the main draw).
+
+EXCLUDE educational platforms where learning is the primary goal, even if they
+use gamification for motivation (e.g., Duolingo, Babbel, Khan Academy,
+Codecademy, educational tools designed by educators).
+
 A site SHOULD be classified as a gaming site ("is_matching_site": true) if its
 PRIMARY purpose is one or more of:
 
@@ -107,11 +119,11 @@ Output:
 Example 5
 Input:
 {
-  "domain": "khanacademy.org",
-  "summary": "Khan Academy is a nonprofit organization with the mission to provide a free, world-class education for anyone, anywhere."
+  "domain": "duolingo.com",
+  "summary": "Duolingo is a language learning platform that uses gamification to make learning fun and engaging."
 }
 Output:
-{ "is_matching_site": false, "confidence": 0.99 }
+{ "is_matching_site": false, "confidence": 0.95 }
 
 NOW CLASSIFY THIS SITE
 

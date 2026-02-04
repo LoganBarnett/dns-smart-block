@@ -9,3 +9,12 @@ strum = { version = "0.26", features = ["derive"] }
 
 [workspace.package]
 edition = "2024"
+
+[package]
+name = "dns-smart-block"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+cargo-husky = { version = "1", features = ["user-hooks"] }
