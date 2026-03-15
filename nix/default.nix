@@ -64,7 +64,6 @@ let
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
   };
 
-let
   # Individual package derivations
   classifier = craneLib.buildPackage (commonArgs // {
     pname = "dns-smart-block-classifier";
