@@ -2,6 +2,7 @@ use crate::error::ClassifierError;
 use reqwest::redirect::Policy;
 use scraper::{Html, Selector};
 use serde::Serialize;
+use std::net::IpAddr;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -46,10 +47,11 @@ pub async fn fetch_domain(
   domain: &str,
   timeout_sec: u64,
   max_kb: usize,
+  resolved_ip: Option<&str>,
 ) -> Result<(String, u16), ClassifierError> {
   info!("Fetching domain: {}", domain);
 
-  let client = reqwest::Client::builder()
+  let mut builder = reqwest::Client::builder()
     .redirect(Policy::limited(10))
     .timeout(Duration::from_secs(timeout_sec))
     .user_agent(
@@ -58,8 +60,35 @@ pub async fn fetch_domain(
        Safari/605.1.15",
     )
     .gzip(true)
-    .danger_accept_invalid_certs(true)
-    .build()?;
+    .danger_accept_invalid_certs(true);
+
+  // When a pre-resolved IP is available, instruct reqwest to connect directly
+  // to that address rather than resolving through the local DNS stack.  This
+  // avoids a second DNS lookup that would generate a spurious log entry in the
+  // upstream resolver (Blocky, etc.) and potentially re-trigger classification.
+  // The Host header and TLS SNI still carry the domain name so the server
+  // responds correctly.  Note: reqwest's resolve() overrides apply per
+  // hostname; HTTP redirects to the same domain reuse the override, while
+  // redirects to other hostnames fall back to normal resolution.
+  if let Some(ip_str) = resolved_ip {
+    match ip_str.parse::<IpAddr>() {
+      Ok(ip) => {
+        // Use port 443 as the connection target for HTTPS (the default fetch
+        // scheme).  Same-domain HTTP redirects (port 80) also benefit since
+        // reqwest reuses the override for the same hostname.
+        builder = builder.resolve(domain, std::net::SocketAddr::new(ip, 443));
+        info!("Using pre-resolved IP {} for {}", ip_str, domain);
+      }
+      Err(e) => {
+        warn!(
+          "Could not parse resolved_ip '{}' for {}: {} — falling back to DNS",
+          ip_str, domain, e
+        );
+      }
+    }
+  }
+
+  let client = builder.build()?;
 
   let url = if domain.starts_with("http://") || domain.starts_with("https://") {
     domain.to_string()

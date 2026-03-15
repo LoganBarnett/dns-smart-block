@@ -185,6 +185,27 @@ in {
           for Blocky) and avoid classifying blocked or non-existent domains.
         '';
       };
+
+      ipPattern = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = ''answer=(?:A|AAAA) \(([0-9a-fA-F:.]+)\)'';
+        description = ''
+          Optional regex to extract the resolved IP address from a log line.
+          When set, the captured IP is forwarded through the pipeline so the
+          classifier can fetch the domain's content by connecting directly to
+          that IP, avoiding a second DNS lookup through the local resolver.
+        '';
+      };
+
+      ipCaptureGroup = mkOption {
+        type = types.ints.positive;
+        default = 1;
+        description = ''
+          Which capture group in <option>ipPattern</option> contains the IP
+          address (1-indexed).
+        '';
+      };
     };
 
     # Queue Processor Global Defaults
@@ -608,6 +629,10 @@ in {
               "--nats-subject '${cfg.nats.subject}'"
             ] ++ lib.optional (cfg.logProcessor.lineFilter != null)
               "--line-filter '${cfg.logProcessor.lineFilter}'"
+            ++ lib.optional (cfg.logProcessor.ipPattern != null)
+              "--ip-pattern '${cfg.logProcessor.ipPattern}'"
+            ++ lib.optional (cfg.logProcessor.ipPattern != null)
+              "--ip-capture-group ${toString cfg.logProcessor.ipCaptureGroup}"
             );
           in args;
 

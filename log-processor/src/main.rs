@@ -28,6 +28,8 @@ async fn main() -> Result<()> {
     &args.domain_pattern,
     args.domain_capture_group,
     args.line_filter.as_deref(),
+    args.ip_pattern.as_deref(),
+    args.ip_capture_group,
   )?;
   let queue =
     QueuePublisher::new(&args.nats_url, args.nats_subject.clone()).await?;
@@ -52,15 +54,21 @@ async fn main() -> Result<()> {
   while let Some(line_result) = stream.next().await {
     match line_result {
       Ok(line) => {
-        if let Some(domain) = parser.parse_log_line(&line) {
-          info!("Found domain in log: {}", domain);
+        if let Some(parsed) = parser.parse_log_line(&line) {
+          info!("Found domain in log: {}", parsed.domain);
 
-          match queue.publish_domain(&domain).await {
+          match queue
+            .publish_domain(&parsed.domain, parsed.resolved_ip)
+            .await
+          {
             Ok(()) => {
-              info!("Queued domain: {}", domain);
+              info!("Queued domain: {}", parsed.domain);
             }
             Err(e) => {
-              error!("Failed to publish domain {} to queue: {}", domain, e);
+              error!(
+                "Failed to publish domain {} to queue: {}",
+                parsed.domain, e
+              );
             }
           }
         }

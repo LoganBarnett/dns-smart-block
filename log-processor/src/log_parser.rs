@@ -2,10 +2,22 @@ use crate::Result;
 use regex::Regex;
 use tracing::debug;
 
+/// The result of parsing a single log line.
+#[derive(Debug, PartialEq)]
+pub struct ParsedLine {
+  /// Normalised (lowercase) registrable domain.
+  pub domain: String,
+  /// Resolved IP address, when the log format includes it and an ip_pattern
+  /// was configured.
+  pub resolved_ip: Option<String>,
+}
+
 pub struct LogParser {
   domain_pattern: Regex,
   capture_group: usize,
   line_filter: Option<Regex>,
+  ip_pattern: Option<Regex>,
+  ip_capture_group: usize,
 }
 
 impl LogParser {
@@ -13,19 +25,24 @@ impl LogParser {
     domain_pattern: &str,
     capture_group: usize,
     line_filter: Option<&str>,
+    ip_pattern: Option<&str>,
+    ip_capture_group: usize,
   ) -> Result<Self> {
     let domain_pattern = Regex::new(domain_pattern)?;
     let line_filter = line_filter.map(Regex::new).transpose()?;
+    let ip_pattern = ip_pattern.map(Regex::new).transpose()?;
     Ok(Self {
       domain_pattern,
       capture_group,
       line_filter,
+      ip_pattern,
+      ip_capture_group,
     })
   }
 
-  /// Parse a log line and extract a domain if it passes the line filter and
-  /// the domain pattern matches.
-  pub fn parse_log_line(&self, line: &str) -> Option<String> {
+  /// Parse a log line and extract a domain (and optionally a resolved IP) if
+  /// it passes the line filter and the domain pattern matches.
+  pub fn parse_log_line(&self, line: &str) -> Option<ParsedLine> {
     if line.trim().is_empty() {
       return None;
     }
@@ -44,7 +61,16 @@ impl LogParser {
         let domain = domain.as_str();
         if is_valid_domain(domain) {
           debug!("Extracted domain: {}", domain);
-          return Some(domain.to_lowercase());
+          let resolved_ip = self.ip_pattern.as_ref().and_then(|pat| {
+            pat
+              .captures(line)
+              .and_then(|c| c.get(self.ip_capture_group))
+              .map(|m| m.as_str().to_string())
+          });
+          return Some(ParsedLine {
+            domain: domain.to_lowercase(),
+            resolved_ip,
+          });
         }
       }
     }
@@ -98,7 +124,7 @@ mod tests {
   const BLOCKY_FILTER: &str = r"response_type=RESOLVED";
 
   fn blocky_parser() -> LogParser {
-    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap()
+    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER), None, 1).unwrap()
   }
 
   #[test]
@@ -111,7 +137,7 @@ mod tests {
       response_code=NOERROR response_reason=RESOLVED (tcp+udp:1.1.1.1) \
       response_type=RESOLVED";
     assert_eq!(
-      parser.parse_log_line(line),
+      parser.parse_log_line(line).map(|p| p.domain),
       Some("minecraft.net".to_string())
     );
   }
@@ -155,10 +181,13 @@ mod tests {
   #[test]
   fn test_no_line_filter() {
     // Without a line filter every line with a matching domain pattern passes.
-    let parser = LogParser::new(BLOCKY_PATTERN, 1, None).unwrap();
+    let parser = LogParser::new(BLOCKY_PATTERN, 1, None, None, 1).unwrap();
 
     let line = "question_name=example.com. response_type=CACHED";
-    assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
+    assert_eq!(
+      parser.parse_log_line(line).map(|p| p.domain),
+      Some("example.com".to_string())
+    );
   }
 
   #[test]
@@ -169,11 +198,16 @@ mod tests {
       r"(prefix\.)([a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z0-9][a-zA-Z0-9-]*)",
       2,
       None,
+      None,
+      1,
     )
     .unwrap();
 
     let line = "prefix.example.com";
-    assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
+    assert_eq!(
+      parser.parse_log_line(line).map(|p| p.domain),
+      Some("example.com".to_string())
+    );
   }
 
   #[test]
@@ -192,7 +226,10 @@ mod tests {
 
     let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved \
       question_name=EXAMPLE.COM. response_type=RESOLVED";
-    assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
+    assert_eq!(
+      parser.parse_log_line(line).map(|p| p.domain),
+      Some("example.com".to_string())
+    );
   }
 
   #[test]

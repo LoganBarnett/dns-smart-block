@@ -44,6 +44,13 @@ pub struct CliArgs {
   #[arg(long, env = "HTTP_MAX_KB", default_value = "200")]
   pub http_max_kb: usize,
 
+  /// Pre-resolved IP address for the domain.  When provided, the HTTP fetch
+  /// connects directly to this IP instead of resolving the domain through the
+  /// local DNS stack, avoiding a duplicate log entry in the upstream resolver.
+  /// The Host header and TLS SNI still use the domain name.
+  #[arg(long, env = "RESOLVED_IP")]
+  pub resolved_ip: Option<String>,
+
   /// Output format (json or human-readable).
   #[arg(long, env = "OUTPUT", default_value = "human")]
   pub output: String,

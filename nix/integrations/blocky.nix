@@ -74,6 +74,13 @@ in {
       # (response_type=CONDITIONAL), and NXDOMAIN entries — all of which would
       # produce either garbage or already-blocked domains.
       lineFilter = lib.mkDefault "response_type=RESOLVED";
+
+      # Extract the resolved IP from Blocky's answer field.  This allows the
+      # classifier to fetch domain content by connecting directly to the IP
+      # instead of re-resolving through Blocky, which would otherwise generate
+      # a duplicate log entry.  Matches both IPv4 (A) and IPv6 (AAAA) records.
+      ipPattern = lib.mkDefault
+        ''answer=(?:A|AAAA) \(([0-9a-fA-F:.]+)\)'';
     };
 
     # Configure blocky blacklists based on either auto-mapping or manual mapping.

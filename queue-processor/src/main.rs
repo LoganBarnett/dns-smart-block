@@ -69,6 +69,8 @@ struct CliArgs {
 struct DomainMessage {
   domain: String,
   timestamp: i64,
+  #[serde(default)]
+  resolved_ip: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -105,6 +107,7 @@ type Result<T> = std::result::Result<T, ProcessorError>;
 
 async fn run_classifier(
   domain: &str,
+  resolved_ip: Option<&str>,
   classifier_config: &ClassifierConfig,
   config: &Config,
   classifier_path: &str,
@@ -119,7 +122,8 @@ async fn run_classifier(
     classifier_config.effective_http_timeout_sec(&config.http);
   let http_max_kb = classifier_config.effective_http_max_kb(&config.http);
 
-  let mut child = Command::new(classifier_path)
+  let mut cmd = Command::new(classifier_path);
+  cmd
     .arg("--domain")
     .arg(domain)
     .arg("--ollama-url")
@@ -135,10 +139,13 @@ async fn run_classifier(
     .arg("--http-max-kb")
     .arg(http_max_kb.to_string())
     .arg("--output")
-    .arg("json")
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()?;
+    .arg("json");
+
+  if let Some(ip) = resolved_ip {
+    cmd.arg("--resolved-ip").arg(ip);
+  }
+
+  let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
   // Read stdout and stderr concurrently.
   // stdout: buffered until completion (small JSON payload)
@@ -221,6 +228,7 @@ async fn run_classifier(
 
 async fn process_domain(
   domain: &str,
+  resolved_ip: Option<&str>,
   config: &Config,
   pool: &PgPool,
   classifier_path: &str,
@@ -348,8 +356,14 @@ async fn process_domain(
     .await?;
 
     // Run the classifier.
-    match run_classifier(domain, classifier_config, config, classifier_path)
-      .await
+    match run_classifier(
+      domain,
+      resolved_ip,
+      classifier_config,
+      config,
+      classifier_path,
+    )
+    .await
     {
       Ok(output) => {
         info!(
@@ -577,6 +591,7 @@ async fn main() -> Result<()> {
         // the next DNS query for this domain.
         match process_domain(
           &domain_msg.domain,
+          domain_msg.resolved_ip.as_deref(),
           &config,
           &pool,
           &args.classifier_path,

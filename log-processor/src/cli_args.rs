@@ -30,6 +30,18 @@ pub struct CliArgs {
   #[arg(long, env = "LINE_FILTER")]
   pub line_filter: Option<String>,
 
+  /// Optional regex to extract the resolved IP address from a log line.
+  /// When set, the captured IP is included in the NATS message so downstream
+  /// components can fetch the domain's content directly by IP, avoiding a
+  /// second DNS lookup through the local resolver.
+  /// Example for Blocky: 'answer=(?:A|AAAA) \(([0-9a-fA-F:.]+)\)'
+  #[arg(long, env = "IP_PATTERN")]
+  pub ip_pattern: Option<String>,
+
+  /// Which capture group in --ip-pattern contains the IP address (1-indexed).
+  #[arg(long, env = "IP_CAPTURE_GROUP", default_value = "1")]
+  pub ip_capture_group: usize,
+
   /// NATS server URL
   #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
   pub nats_url: String,

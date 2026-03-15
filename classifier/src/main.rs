@@ -112,39 +112,43 @@ async fn run_classification(
   // Fetch domain content (best-effort - continue even if it fails)
   info!("Step 2/3: Fetching domain content from {}...", args.domain);
   let fetch_start = Instant::now();
-  let metadata =
-    match fetch_domain(&args.domain, args.http_timeout_sec, args.http_max_kb)
-      .await
-    {
-      Ok((html, status)) => {
-        info!(
-          "  HTTP fetch succeeded: status={}, size={} bytes, elapsed={:.2}s",
-          status,
-          html.len(),
-          fetch_start.elapsed().as_secs_f64()
-        );
-        // Successfully fetched - extract metadata from HTML
-        extract_metadata(&args.domain, &html, status).unwrap_or_else(|e| {
-          error!("Failed to extract metadata from HTML: {}", e);
-          // Fall back to minimal metadata with fetch error
-          use dns_smart_block_classifier::web_classify::SiteMetadata;
-          SiteMetadata::from_fetch_error(
-            &args.domain,
-            &format!("Metadata extraction failed: {}", e),
-          )
-        })
-      }
-      Err(e) => {
-        error!(
-          "  HTTP fetch failed after {:.2}s: {}",
-          fetch_start.elapsed().as_secs_f64(),
-          e
-        );
-        // HTTP fetch failed - create minimal metadata with just domain name
+  let metadata = match fetch_domain(
+    &args.domain,
+    args.http_timeout_sec,
+    args.http_max_kb,
+    args.resolved_ip.as_deref(),
+  )
+  .await
+  {
+    Ok((html, status)) => {
+      info!(
+        "  HTTP fetch succeeded: status={}, size={} bytes, elapsed={:.2}s",
+        status,
+        html.len(),
+        fetch_start.elapsed().as_secs_f64()
+      );
+      // Successfully fetched - extract metadata from HTML
+      extract_metadata(&args.domain, &html, status).unwrap_or_else(|e| {
+        error!("Failed to extract metadata from HTML: {}", e);
+        // Fall back to minimal metadata with fetch error
         use dns_smart_block_classifier::web_classify::SiteMetadata;
-        SiteMetadata::from_fetch_error(&args.domain, &e.to_string())
-      }
-    };
+        SiteMetadata::from_fetch_error(
+          &args.domain,
+          &format!("Metadata extraction failed: {}", e),
+        )
+      })
+    }
+    Err(e) => {
+      error!(
+        "  HTTP fetch failed after {:.2}s: {}",
+        fetch_start.elapsed().as_secs_f64(),
+        e
+      );
+      // HTTP fetch failed - create minimal metadata with just domain name
+      use dns_smart_block_classifier::web_classify::SiteMetadata;
+      SiteMetadata::from_fetch_error(&args.domain, &e.to_string())
+    }
+  };
 
   info!("  Extracted metadata:");
   info!("    Title: {:?}", metadata.title);

@@ -36,7 +36,8 @@ fn blocky_blocked(question_name: &str) -> String {
 
 #[tokio::test]
 async fn test_log_parser_extracts_resolved_domains_only() {
-  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
+  let parser =
+    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER), None, 1).unwrap();
 
   let log_lines = [
     blocky_resolved("gaming-site.com"),
@@ -48,7 +49,7 @@ async fn test_log_parser_extracts_resolved_domains_only() {
 
   let mut extracted: Vec<String> = log_lines
     .iter()
-    .filter_map(|line| parser.parse_log_line(line))
+    .filter_map(|line| parser.parse_log_line(line).map(|p| p.domain))
     .collect();
   extracted.sort();
 
@@ -73,7 +74,8 @@ async fn test_log_source_command_stream() {
 
 #[tokio::test]
 async fn test_full_parsing_flow_deduplication() {
-  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
+  let parser =
+    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER), None, 1).unwrap();
 
   let log_lines = [
     blocky_resolved("gaming-site.com"),
@@ -84,8 +86,8 @@ async fn test_full_parsing_flow_deduplication() {
 
   let mut unique_domains = std::collections::HashSet::new();
   for line in &log_lines {
-    if let Some(domain) = parser.parse_log_line(line) {
-      unique_domains.insert(domain);
+    if let Some(parsed) = parser.parse_log_line(line) {
+      unique_domains.insert(parsed.domain);
     }
   }
 
@@ -96,7 +98,8 @@ async fn test_full_parsing_flow_deduplication() {
 
 #[tokio::test]
 async fn test_log_parser_with_various_dns_record_types() {
-  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
+  let parser =
+    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER), None, 1).unwrap();
 
   for record_type in ["A", "AAAA", "MX", "TXT", "NS", "CNAME"] {
     let line = format!(
@@ -106,7 +109,7 @@ async fn test_log_parser_with_various_dns_record_types() {
        response_code=NOERROR response_type=RESOLVED"
     );
     assert_eq!(
-      parser.parse_log_line(&line),
+      parser.parse_log_line(&line).map(|p| p.domain),
       Some("example.com".to_string()),
       "Failed for record type {record_type}"
     );
@@ -115,14 +118,15 @@ async fn test_log_parser_with_various_dns_record_types() {
 
 #[tokio::test]
 async fn test_case_insensitive_domain_extraction() {
-  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
+  let parser =
+    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER), None, 1).unwrap();
 
   let domains =
     ["EXAMPLE.COM", "Example.Com", "example.com"].map(blocky_resolved);
 
   let extracted: Vec<String> = domains
     .iter()
-    .filter_map(|line| parser.parse_log_line(line))
+    .filter_map(|line| parser.parse_log_line(line).map(|p| p.domain))
     .collect();
 
   assert_eq!(extracted.len(), 3);
@@ -131,7 +135,8 @@ async fn test_case_insensitive_domain_extraction() {
 
 #[test]
 fn test_domain_validation_edge_cases() {
-  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
+  let parser =
+    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER), None, 1).unwrap();
 
   // The Blocky pattern requires a trailing dot, so domains that end with a
   // hyphen or start with a hyphen won't match the regex at all.  Domains
