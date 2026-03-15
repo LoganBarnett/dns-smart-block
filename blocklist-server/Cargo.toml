@@ -8,7 +8,7 @@ dns-smart-block-common = { path = "../common" }
 tokio = { version = "*", features = ["full"] }
 axum = "0.7"
 tower = "*"
-tower-http = { version = "*", features = ["trace", "cors"] }
+tower-http = { version = "*", features = ["trace", "cors", "fs"] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 atty = "*"

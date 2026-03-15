@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Classifications{{FILTER_INFO}}</title>
+  <link rel="stylesheet" href="/static/classifications.css">
+</head>
+<body>
+  <h1>Classifications{{FILTER_INFO}}</h1>
+  <div class="count">Total: {{COUNT}} classification(s)</div>
+  <table id="classificationsTable">
+    <thead>
+      <tr>
+        <th onclick="sortTable(0)">Domain</th>
+        <th onclick="sortTable(1)">Type</th>
+        <th onclick="sortTable(2)">Match</th>
+        <th onclick="sortTable(3)">Confidence</th>
+        <th onclick="sortTable(4)">Reasoning</th>
+        <th onclick="sortTable(5)">Model</th>
+        <th onclick="sortTable(6)">Valid On</th>
+        <th onclick="sortTable(7)">Valid Until</th>
+        <th onclick="sortTable(8)">Created At</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{ROWS}}
+    </tbody>
+  </table>
+  <script src="/static/classifications.js"></script>
+</body>
+</html>

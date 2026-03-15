@@ -23,6 +23,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -405,191 +406,18 @@ fn render_classifications_html(
     })
     .collect();
 
-  format!(
-    r#"<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Classifications{}</title>
-  <style>
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 20px;
-      background: #f5f5f5;
-    }}
-    h1 {{
-      color: #333;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      background: white;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }}
-    th, td {{
-      padding: 12px;
-      text-align: left;
-      border-bottom: 1px solid #ddd;
-    }}
-    th {{
-      background: #4CAF50;
-      color: white;
-      cursor: pointer;
-      user-select: none;
-      position: sticky;
-      top: 0;
-      z-index: 10;
-    }}
-    th:hover {{
-      background: #45a049;
-    }}
-    th.sorted-asc::after {{
-      content: " ▲";
-    }}
-    th.sorted-desc::after {{
-      content: " ▼";
-    }}
-    tr:hover {{
-      background: #f5f5f5;
-    }}
-    .reasoning {{
-      max-width: 400px;
-      white-space: normal;
-      word-wrap: break-word;
-    }}
-    .count {{
-      color: #666;
-      font-size: 14px;
-      margin-bottom: 10px;
-    }}
-    .expire-btn {{
-      background: #f44336;
-      color: white;
-      border: none;
-      padding: 6px 12px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 13px;
-    }}
-    .expire-btn:hover {{
-      background: #da190b;
-    }}
-    .expire-btn:disabled {{
-      background: #ccc;
-      cursor: not-allowed;
-    }}
-  </style>
-</head>
-<body>
-  <h1>Classifications{}</h1>
-  <div class="count">Total: {} classification(s)</div>
-  <table id="classificationsTable">
-    <thead>
-      <tr>
-        <th onclick="sortTable(0)">Domain</th>
-        <th onclick="sortTable(1)">Type</th>
-        <th onclick="sortTable(2)">Match</th>
-        <th onclick="sortTable(3)">Confidence</th>
-        <th onclick="sortTable(4)">Reasoning</th>
-        <th onclick="sortTable(5)">Model</th>
-        <th onclick="sortTable(6)">Valid On</th>
-        <th onclick="sortTable(7)">Valid Until</th>
-        <th onclick="sortTable(8)">Created At</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {}
-    </tbody>
-  </table>
-  <script>
-    let sortDirection = {{}};
+  // Read the HTML template from file
+  let template = std::fs::read_to_string("templates/classifications.html")
+    .unwrap_or_else(|e| {
+      error!("Failed to read template file: {}", e);
+      String::from("<html><body>Error loading template</body></html>")
+    });
 
-    function sortTable(columnIndex) {{
-      const table = document.getElementById('classificationsTable');
-      const tbody = table.querySelector('tbody');
-      const rows = Array.from(tbody.querySelectorAll('tr'));
-
-      const currentDirection = sortDirection[columnIndex] || 'asc';
-      const newDirection = currentDirection === 'asc' ? 'desc' : 'asc';
-      sortDirection = {{ [columnIndex]: newDirection }};
-
-      rows.sort((a, b) => {{
-        let aValue = a.cells[columnIndex].textContent.trim();
-        let bValue = b.cells[columnIndex].textContent.trim();
-
-        // Try to parse as date/time.
-        const aDate = new Date(aValue);
-        const bDate = new Date(bValue);
-
-        if (!isNaN(aDate.getTime()) && !isNaN(bDate.getTime())) {{
-          return newDirection === 'asc'
-            ? aDate.getTime() - bDate.getTime()
-            : bDate.getTime() - aDate.getTime();
-        }}
-
-        // Try to parse as number.
-        const aNum = parseFloat(aValue);
-        const bNum = parseFloat(bValue);
-
-        if (!isNaN(aNum) && !isNaN(bNum)) {{
-          return newDirection === 'asc' ? aNum - bNum : bNum - aNum;
-        }}
-
-        // String comparison.
-        if (newDirection === 'asc') {{
-          return aValue.localeCompare(bValue);
-        }} else {{
-          return bValue.localeCompare(aValue);
-        }}
-      }});
-
-      rows.forEach(row => tbody.appendChild(row));
-
-      // Update header indicators.
-      table.querySelectorAll('th').forEach((th, idx) => {{
-        th.classList.remove('sorted-asc', 'sorted-desc');
-        if (idx === columnIndex) {{
-          th.classList.add(`sorted-${{newDirection}}`);
-        }}
-      }});
-    }}
-
-    async function expireDomain(domain) {{
-      const button = event.target;
-      button.disabled = true;
-      button.textContent = 'Expiring...';
-
-      try {{
-        const response = await fetch(`/expire?domain=${{encodeURIComponent(domain)}}`, {{
-          method: 'POST',
-        }});
-
-        if (response.ok) {{
-          const result = await response.text();
-          alert(`Success: ${{result}}`);
-          // Reload the page to show updated data
-          window.location.reload();
-        }} else {{
-          const error = await response.text();
-          alert(`Error: ${{error}}`);
-          button.disabled = false;
-          button.textContent = 'Expire';
-        }}
-      }} catch (error) {{
-        alert(`Failed to expire domain: ${{error.message}}`);
-        button.disabled = false;
-        button.textContent = 'Expire';
-      }}
-    }}
-  </script>
-</body>
-</html>"#,
-    filter_info,
-    filter_info,
-    classifications.len(),
-    rows
-  )
+  // Perform substitutions
+  template
+    .replace("{{FILTER_INFO}}", &filter_info)
+    .replace("{{COUNT}}", &classifications.len().to_string())
+    .replace("{{ROWS}}", &rows)
 }
 
 fn html_escape(s: &str) -> String {
@@ -749,6 +577,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .route("/classifications", get(get_classifications))
     .route("/reprojection", post(reprojection))
     .route("/expire", post(expire))
+    .nest_service("/static", ServeDir::new("static"))
     .layer(TraceLayer::new_for_http())
     .with_state(state);
 
