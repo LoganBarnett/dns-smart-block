@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use dns_smart_block_common::db_models::{ClassificationInsert, DomainUpsert};
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgQueryResult};
+use sqlx::{postgres::PgQueryResult, PgPool, Postgres, Row, Transaction};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -387,9 +387,9 @@ pub async fn rebuild_projections_from_events(
       AND is_matching_site IS NOT NULL
       AND confidence IS NOT NULL
     "#,
-    )
-    .fetch_all(pool)
-    .await?;
+  )
+  .fetch_all(pool)
+  .await?;
 
   let mut tx = pool.begin().await?;
   let mut count = 0i64;

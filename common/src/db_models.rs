@@ -242,28 +242,22 @@ pub struct DomainExpire {
 }
 
 impl DomainExpire {
-  /// Expire this domain.
+  /// Expire this domain by setting valid_until to NOW() for all non-expired classifications.
+  /// Domain classification events are immutable and are not modified.
   pub async fn expire(
     &self,
     tx: &mut Transaction<'_, Postgres>,
   ) -> Result<PgQueryResult, sqlx::Error> {
-    let domain_classifications_expire = sqlx::query(
+    sqlx::query(
       r#"
       UPDATE domain_classifications
       SET valid_until = NOW()
-      WHERE domain = $1 AND valid_on > NOW()
+      WHERE domain = $1 AND valid_until > NOW()
       "#,
     )
-      .bind(&self.domain)
-      .execute(&mut **tx);
-    let domain_events_expire = sqlx::query(
-      r#"
-
-      "#,
-    )
-      .bind(&self.domain)
-      .execute(&mut **tx);
-    tokio::join!(domain_classifications_expire, domain_events_expire);
+    .bind(&self.domain)
+    .execute(&mut **tx)
+    .await
   }
 }
 /// Full domain record as read from the database.

@@ -389,6 +389,7 @@ fn render_classifications_html(
           <td>{}</td>
           <td>{}</td>
           <td>{}</td>
+          <td><button class="expire-btn" onclick="expireDomain('{}')">Expire</button></td>
         </tr>"#,
         html_escape(&c.domain),
         html_escape(&c.classification_type),
@@ -399,6 +400,7 @@ fn render_classifications_html(
         c.valid_on.format("%Y-%m-%d %H:%M:%S"),
         c.valid_until.format("%Y-%m-%d %H:%M:%S"),
         c.created_at.format("%Y-%m-%d %H:%M:%S"),
+        html_escape(&c.domain),
       )
     })
     .collect();
@@ -460,6 +462,22 @@ fn render_classifications_html(
       font-size: 14px;
       margin-bottom: 10px;
     }}
+    .expire-btn {{
+      background: #f44336;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }}
+    .expire-btn:hover {{
+      background: #da190b;
+    }}
+    .expire-btn:disabled {{
+      background: #ccc;
+      cursor: not-allowed;
+    }}
   </style>
 </head>
 <body>
@@ -477,6 +495,7 @@ fn render_classifications_html(
         <th onclick="sortTable(6)">Valid On</th>
         <th onclick="sortTable(7)">Valid Until</th>
         <th onclick="sortTable(8)">Created At</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -534,6 +553,34 @@ fn render_classifications_html(
           th.classList.add(`sorted-${{newDirection}}`);
         }}
       }});
+    }}
+
+    async function expireDomain(domain) {{
+      const button = event.target;
+      button.disabled = true;
+      button.textContent = 'Expiring...';
+
+      try {{
+        const response = await fetch(`/expire?domain=${{encodeURIComponent(domain)}}`, {{
+          method: 'POST',
+        }});
+
+        if (response.ok) {{
+          const result = await response.text();
+          alert(`Success: ${{result}}`);
+          // Reload the page to show updated data
+          window.location.reload();
+        }} else {{
+          const error = await response.text();
+          alert(`Error: ${{error}}`);
+          button.disabled = false;
+          button.textContent = 'Expire';
+        }}
+      }} catch (error) {{
+        alert(`Failed to expire domain: ${{error.message}}`);
+        button.disabled = false;
+        button.textContent = 'Expire';
+      }}
     }}
   </script>
 </body>
@@ -601,19 +648,36 @@ async fn expire(
   Query(params): Query<ExpirationParams>,
 ) -> impl IntoResponse {
   info!("Expiring domain '{}'", params.domain);
-  let mut tx = state.pool.begin().await?;
-  let expire_result = db::domain_expire(&mut tx, params.domain).await;
-  tx.commit().await?;
+
+  let mut tx = match state.pool.begin().await {
+    Ok(tx) => tx,
+    Err(e) => {
+      error!("Failed to begin transaction: {}", e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Failed to begin transaction: {}\n", e),
+      );
+    }
+  };
+
+  let expire_result = db::domain_expire(&mut tx, params.domain.clone()).await;
+
+  if let Err(e) = tx.commit().await {
+    error!("Failed to commit transaction: {}", e);
+    return (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Failed to commit transaction: {}\n", e),
+    );
+  }
+
   match expire_result {
     Ok(_) => {
       info!("Expired domain '{}'!", params.domain);
       (
         StatusCode::OK,
-        format!(
-          "Expired domain successful: {}", params.domain,
-        )
+        format!("Expired domain successful: {}", params.domain),
       )
-    },
+    }
     Err(e) => {
       error!("Domain expiration failed: {}", e);
       (
