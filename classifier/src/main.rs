@@ -10,16 +10,10 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
-    // Always initialize tracing to stderr
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
     let args = CliArgs::parse();
+
+    // Initialize logging with auto-detection and CLI overrides
+    args.logging.init_tracing();
 
     info!("Starting DNS Smart Block Classifier");
     info!("Domain: {}", args.domain);

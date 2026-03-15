@@ -9,6 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use clap::Parser;
+use dns_smart_block_common::logging::LoggingArgs;
 use lazy_static::lazy_static;
 use prometheus::{Encoder, IntCounter, IntGauge, IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
 use prometheus::register_int_counter;
@@ -78,6 +79,9 @@ lazy_static! {
 #[command(name = "dns-smart-block-blocklist-server")]
 #[command(about = "Serves DNS blocklists from database classifications")]
 struct CliArgs {
+    #[command(flatten)]
+    logging: LoggingArgs,
+
     /// PostgreSQL connection URL (without password if using password file)
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
@@ -236,16 +240,10 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
     let args = CliArgs::parse();
+
+    // Initialize logging with auto-detection and CLI overrides
+    args.logging.init_tracing();
 
     info!("Starting DNS Smart Block Blocklist Server");
 

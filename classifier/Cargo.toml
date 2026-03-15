@@ -8,6 +8,7 @@ name = "dns_smart_block_classifier"
 path = "src/lib.rs"
 
 [dependencies]
+dns-smart-block-common = { path = "../common" }
 clap = { version = "*", features = ["derive", "env"] }
 reqwest = { version = "*", features = ["json", "gzip"] }
 scraper = "*"
@@ -16,6 +17,7 @@ serde_json = "*"
 tokio = { version = "*", features = ["full"] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
+atty = "*"
 thiserror = "*"
 strum = { workspace = true }
 sha2 = "0.10"

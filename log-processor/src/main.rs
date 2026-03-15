@@ -12,15 +12,10 @@ use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  tracing_subscriber::fmt()
-    .with_writer(std::io::stderr)
-    .with_env_filter(
-      tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(tracing::Level::INFO.into()),
-    )
-    .init();
-
   let args = CliArgs::parse();
+
+  // Initialize logging with auto-detection and CLI overrides
+  args.logging.init_tracing();
 
   info!("Starting DNS Smart Block Log Processor");
   info!("Log source: {}", args.log_source);

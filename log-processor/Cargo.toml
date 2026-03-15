@@ -8,6 +8,7 @@ name = "dns_smart_block_log_processor"
 path = "src/lib.rs"
 
 [dependencies]
+dns-smart-block-common = { path = "../common" }
 clap = { version = "*", features = ["derive", "env"] }
 tokio = { version = "*", features = ["full"] }
 tokio-util = { version = "*", features = ["codec"] }
@@ -15,6 +16,7 @@ futures = "*"
 async-stream = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
+atty = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"

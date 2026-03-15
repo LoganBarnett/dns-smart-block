@@ -1,0 +1,10 @@
+[package]
+name = "dns-smart-block-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "*", features = ["derive", "env"] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+atty = "*"

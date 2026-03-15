@@ -1,4 +1,5 @@
 use clap::Parser;
+use dns_smart_block_common::logging::LoggingArgs;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -8,6 +9,9 @@ use std::path::PathBuf;
   about = "Classifier for DNS smart blocking using LLM classification"
 )]
 pub struct CliArgs {
+  #[command(flatten)]
+  pub logging: LoggingArgs,
+
   /// Domain to classify.
   #[arg(long, env = "DOMAIN")]
   pub domain: String,

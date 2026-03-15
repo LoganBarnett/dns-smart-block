@@ -1,10 +1,14 @@
 use clap::Parser;
+use dns_smart_block_common::logging::LoggingArgs;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "dns-smart-block-log-processor")]
 #[command(about = "Watches DNS logs and queues domains for classification")]
 pub struct CliArgs {
+  #[command(flatten)]
+  pub logging: LoggingArgs,
+
   /// Log source: either a file path or a command to run (prefix with 'cmd:')
   /// Examples: '/var/log/dns.log' or 'cmd:journalctl -f -u dns-server'
   #[arg(long, env = "LOG_SOURCE")]

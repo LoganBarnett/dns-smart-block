@@ -2,6 +2,7 @@ mod database_url;
 mod db;
 
 use clap::Parser;
+use dns_smart_block_common::logging::LoggingArgs;
 use database_url::{construct_database_url, sanitize_database_url};
 use db::DbError;
 use dns_smart_block_classifier::{compute_prompt_hash, output::ClassificationOutput};
@@ -20,6 +21,9 @@ use tracing::{error, info, warn};
 #[command(name = "dns-smart-block-queue-processor")]
 #[command(about = "Processes domains from NATS queue and classifies them")]
 struct CliArgs {
+    #[command(flatten)]
+    logging: LoggingArgs,
+
     /// NATS server URL
     #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
     nats_url: String,
@@ -352,15 +356,10 @@ async fn process_domain(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
     let args = CliArgs::parse();
+
+    // Initialize logging with auto-detection and CLI overrides
+    args.logging.init_tracing();
 
     info!("Starting DNS Smart Block Queue Processor");
     info!("NATS URL: {}", args.nats_url);
