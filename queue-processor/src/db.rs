@@ -163,7 +163,7 @@ pub async fn insert_classification(
   confidence: f32,
   reasoning: &str,
   model: &str,
-  prompt_id: i32,
+  prompt_id: Option<i32>,
   ttl_days: i64,
 ) -> Result<(), DbError> {
   let valid_on = Utc::now();
@@ -222,7 +222,7 @@ pub async fn update_projections(
     confidence as f32,
     reasoning,
     model,
-    prompt_id,
+    Some(prompt_id),
     ttl_days,
   )
   .await?;

@@ -869,11 +869,10 @@ mod tests {
     assert_eq!(updated_classification.3, "test-model-v2");
 
     // Verify domains table was populated
-    let domain_count: i64 =
-      sqlx::query_scalar("SELECT COUNT(*) FROM domains")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let domain_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains")
+      .fetch_one(&pool)
+      .await
+      .unwrap();
     assert_eq!(domain_count, 4);
   }
 }
