@@ -9,6 +9,3 @@ strum = { version = "0.26", features = ["derive"] }
 
 [workspace.package]
 edition = "2024"
-
-[workspace.dev-dependencies]
-cargo-husky = { version = "1", features = ["user-hooks"] }

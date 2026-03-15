@@ -8,3 +8,6 @@ clap = { version = "*", features = ["derive", "env"] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 atty = "*"
+
+[dev-dependencies]
+cargo-husky = { version = "1", features = ["user-hooks"] }
