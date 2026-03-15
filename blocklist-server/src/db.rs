@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use dns_smart_block_common::db_models::{ClassificationInsert, DomainUpsert};
-use sqlx::{postgres::PgQueryResult, PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgQueryResult};
 use std::collections::HashMap;
 use thiserror::Error;
 

@@ -1,11 +1,11 @@
 mod db;
 
 use axum::{
+  Router,
   extract::{Query, State},
   http::StatusCode,
   response::IntoResponse,
   routing::{get, post},
-  Router,
 };
 use chrono::{DateTime, Utc};
 use clap::Parser;
@@ -407,12 +407,17 @@ fn render_classifications_html(
     .collect();
 
   // Read the HTML template from file
-  let template =
-    std::fs::read_to_string("blocklist-server/templates/classifications.html")
-      .unwrap_or_else(|e| {
-        error!("Failed to read template file: {}", e);
-        String::from("<html><body>Error loading template</body></html>")
-      });
+  let template_path = "blocklist-server/templates/classifications.html";
+  let template = std::fs::read_to_string(template_path).unwrap_or_else(|e| {
+    let cwd = std::env::current_dir()
+      .map(|p| p.display().to_string())
+      .unwrap_or_else(|_| "<unknown>".to_string());
+    error!(
+      "Failed to read template file '{}': {} (current directory: {})",
+      template_path, e, cwd
+    );
+    String::from("<html><body>Error loading template</body></html>")
+  });
 
   // Perform substitutions
   template
@@ -540,7 +545,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let database_url = if let Some(password_file) = args.database_password_file {
     let password = std::fs::read_to_string(&password_file)
       .map_err(|e| {
-        error!("Failed to read database password file: {}", e);
+        error!(
+          "Failed to read database password file '{}': {}",
+          password_file.display(),
+          e
+        );
         e
       })?
       .trim()
