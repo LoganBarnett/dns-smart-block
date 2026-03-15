@@ -144,7 +144,6 @@ in {
       --http-timeout-sec 5
       --max-inflight 64
       --allowlist-file /var/lib/domain-classifier/allow.txt
-      --state-db /var/lib/domain-classifier/state.sqlite
     '';
     User = "domainc";
     Group = "domainc";
@@ -174,7 +173,7 @@ HTTP fetch: reqwest with --compressed / gzip
 HTML → text: html2text or scraper (title/meta); optional: readability via readability-cli fallback
 LLM client: simple reqwest POST to Ollama /api/generate
 Git ops: git2 (libgit2) for add/commit/push
-State: rusqlite for dedup, backoff, last-seen timestamps
+State: sqlx + PostgreSQL for dedup, backoff, last-seen timestamps
 DNS control: plain TCP to ~dnsdist~ control socket; send addDomainBlock("example.com") with auth key
 Config: clap long flags; serde for JSON
 
@@ -185,7 +184,7 @@ Parse line → fields: clientIP, clientName, question, responseReason, responseA
 Filter: enqueue only if
 a) responseReason != "BLOCKED" and
 b) registrable_domain(question) not in local allowlist and
-c) not seen recently (state.sqlite with TTL)
+c) not seen recently (PostgreSQL state with TTL)
 d)
 
 *** Normalization
@@ -258,7 +257,7 @@ git append to lists/${CATEGORY}.txt if not present
 commit & push with message including confidence
 Template:
 block(${CATEGORY}): example.com (confidence=${CONF}) [worker vX.Y, model=${MODEL}]
-Else: record in state.sqlite with decision + confidence; optionally enqueue for manual review.
+Else: record in PostgreSQL with decision + confidence; optionally enqueue for manual review.
 
 *** Git writing rules
 
@@ -315,7 +314,6 @@ domain-classifier
   --http-max-kb 200 # cap download size
   --max-inflight 64 # concurrent workers
   --allowlist-file /var/lib/domain-classifier/allow.txt # local allowlist
-  --state-db /var/lib/domain-classifier/state.sqlite # dedupe + history
 #+END_SRC
 
 ** Root commands you’ll run (examples)
