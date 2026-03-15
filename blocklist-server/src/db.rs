@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use dns_smart_block_common::db_models::ClassificationInsert;
+use dns_smart_block_common::db_models::{ClassificationInsert, DomainUpsert};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -388,6 +388,12 @@ pub async fn rebuild_projections_from_events(
     // Calculate validity window based on event time
     let valid_on = event_created_at;
     let valid_until = valid_on + Duration::days(ttl_days);
+
+    // Upsert domain to ensure it exists (foreign key constraint)
+    let domain_upsert = DomainUpsert {
+      domain: domain.clone(),
+    };
+    domain_upsert.upsert(&mut tx).await?;
 
     // Insert projection with full event data using typed struct
     let classification = ClassificationInsert {
