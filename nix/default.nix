@@ -64,8 +64,7 @@ let
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
   };
 
-in
-{
+let
   # Individual package derivations
   classifier = craneLib.buildPackage (commonArgs // {
     pname = "dns-smart-block-classifier";
@@ -129,26 +128,13 @@ in
   all = pkgs.symlinkJoin {
     name = "dns-smart-block-all";
     paths = [
-      (lib.getExe' craneLib.buildPackage (commonArgs // {
-        pname = "dns-smart-block-classifier";
-        cargoExtraArgs = "--package dns-smart-block-classifier";
-        postInstall = ''
-          mkdir -p $out/share/dns-smart-block/prompts
-          cp ${../prompts}/*.txt $out/share/dns-smart-block/prompts/
-        '';
-      }) "dns-smart-block-classifier")
-      (lib.getExe' craneLib.buildPackage (commonArgs // {
-        pname = "dns-smart-block-log-processor";
-        cargoExtraArgs = "--package dns-smart-block-log-processor";
-      }) "dns-smart-block-log-processor")
-      (lib.getExe' craneLib.buildPackage (commonArgs // {
-        pname = "dns-smart-block-queue-processor";
-        cargoExtraArgs = "--package dns-smart-block-queue-processor";
-      }) "dns-smart-block-queue-processor")
-      (lib.getExe' craneLib.buildPackage (commonArgs // {
-        pname = "dns-smart-block-blocklist-server";
-        cargoExtraArgs = "--package dns-smart-block-blocklist-server";
-      }) "dns-smart-block-blocklist-server")
+      classifier
+      log-processor
+      queue-processor
+      blocklist-server
     ];
   };
+in
+{
+  inherit classifier log-processor queue-processor blocklist-server all;
 }
