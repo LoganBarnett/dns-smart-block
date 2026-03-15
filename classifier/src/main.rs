@@ -97,44 +97,28 @@ async fn run_classification(
     let prompt_hash = compute_prompt_hash(&prompt_template);
     info!("Prompt hash: {}", prompt_hash);
 
-    // Fetch domain content
-    let (html, status) =
-        fetch_domain(&args.domain, args.http_timeout_sec, args.http_max_kb)
-            .await
-            .map_err(|e| {
-                error!("Failed to fetch domain: {}", e);
-                let err = ClassifierError::from(e);
-                ErrorOutput {
-                    domain: args.domain.clone(),
-                    result: "error".to_string(),
-                    error: ErrorInfo {
-                        error_type: err.to_error_type(),
-                        message: err.to_string(),
-                    },
-                    metadata: Some(PartialMetadata {
-                        model: args.ollama_model.clone(),
-                        prompt_hash: prompt_hash.clone(),
-                    }),
-                }
-            })?;
-
-    // Extract metadata
-    let metadata = extract_metadata(&args.domain, &html, status).map_err(|e| {
-        error!("Failed to extract metadata: {}", e);
-        let err = ClassifierError::from(e);
-        ErrorOutput {
-            domain: args.domain.clone(),
-            result: "error".to_string(),
-            error: ErrorInfo {
-                error_type: err.to_error_type(),
-                message: err.to_string(),
-            },
-            metadata: Some(PartialMetadata {
-                model: args.ollama_model.clone(),
-                prompt_hash: prompt_hash.clone(),
-            }),
+    // Fetch domain content (best-effort - continue even if it fails)
+    let metadata = match fetch_domain(&args.domain, args.http_timeout_sec, args.http_max_kb).await
+    {
+        Ok((html, status)) => {
+            // Successfully fetched - extract metadata from HTML
+            extract_metadata(&args.domain, &html, status).unwrap_or_else(|e| {
+                error!("Failed to extract metadata from HTML: {}", e);
+                // Fall back to minimal metadata with fetch error
+                use dns_smart_block_classifier::web_classify::SiteMetadata;
+                SiteMetadata::from_fetch_error(
+                    &args.domain,
+                    &format!("Metadata extraction failed: {}", e),
+                )
+            })
         }
-    })?;
+        Err(e) => {
+            // HTTP fetch failed - create minimal metadata with just domain name
+            error!("Failed to fetch domain (will classify anyway): {}", e);
+            use dns_smart_block_classifier::web_classify::SiteMetadata;
+            SiteMetadata::from_fetch_error(&args.domain, &e.to_string())
+        }
+    };
 
     info!("Extracted metadata: {:#?}", metadata);
 
@@ -172,7 +156,7 @@ async fn run_classification(
         result: "classified".to_string(),
         classification,
         metadata: ClassificationMetadata {
-            http_status: status,
+            http_status: metadata.http_status,
             model: args.ollama_model.clone(),
             prompt_hash,
         },

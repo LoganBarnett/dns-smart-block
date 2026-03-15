@@ -16,6 +16,8 @@ serde = { version = "*", features = ["derive"] }
 clap = { version = "*", features = ["derive", "env"] }
 url = "*"
 thiserror = "*"
+prometheus = "*"
+lazy_static = "1.4"
 
 [dev-dependencies]
 axum-test = "*"

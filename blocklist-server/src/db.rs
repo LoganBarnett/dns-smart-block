@@ -1,11 +1,29 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DbError {
     #[error("Database error: {0}")]
     SqlxError(#[from] sqlx::Error),
+}
+
+/// Statistics about classifications in the database.
+#[derive(Debug, Clone)]
+pub struct MetricsStats {
+    /// Count of currently valid classifications per type.
+    pub current_classifications_by_type: HashMap<String, i64>,
+    /// Total count of currently valid classifications (all types).
+    pub current_classifications_total: i64,
+    /// Total unique domains ever seen.
+    pub domains_seen_total: i64,
+    /// Count of classification events by action type.
+    pub events_by_action: HashMap<String, i64>,
+    /// Total classifications ever created per type (cumulative).
+    pub classifications_created_by_type: HashMap<String, i64>,
+    /// Total classifications ever created (all types).
+    pub classifications_created_total: i64,
 }
 
 /// Get all blocked domains for a given classification type at a specific time
@@ -41,6 +59,99 @@ pub async fn get_blocked_domains(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(domains)
+}
+
+/// Get comprehensive metrics statistics from the database.
+pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
+    let now = Utc::now();
+
+    // Get currently valid classifications count by type.
+    let current_by_type_rows = sqlx::query(
+        r#"
+        SELECT classification_type, COUNT(DISTINCT domain) as count
+        FROM domain_classifications
+        WHERE valid_on <= $1 AND valid_until > $1
+        GROUP BY classification_type
+        "#,
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    let mut current_classifications_by_type = HashMap::new();
+    for row in current_by_type_rows {
+        let classification_type: String = row.try_get("classification_type")?;
+        let count: i64 = row.try_get("count")?;
+        current_classifications_by_type.insert(classification_type, count);
+    }
+
+    // Get total currently valid classifications.
+    let current_total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT domain)
+        FROM domain_classifications
+        WHERE valid_on <= $1 AND valid_until > $1
+        "#,
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+
+    // Get total unique domains seen.
+    let domains_seen_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains")
+        .fetch_one(pool)
+        .await?;
+
+    // Get event counts by action type.
+    let events_by_action_rows = sqlx::query(
+        r#"
+        SELECT action::text as action, COUNT(*) as count
+        FROM domain_classification_events
+        GROUP BY action
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut events_by_action = HashMap::new();
+    for row in events_by_action_rows {
+        let action: String = row.try_get("action")?;
+        let count: i64 = row.try_get("count")?;
+        events_by_action.insert(action, count);
+    }
+
+    // Get cumulative classifications created by type.
+    let created_by_type_rows = sqlx::query(
+        r#"
+        SELECT classification_type, COUNT(*) as count
+        FROM domain_classifications
+        GROUP BY classification_type
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut classifications_created_by_type = HashMap::new();
+    for row in created_by_type_rows {
+        let classification_type: String = row.try_get("classification_type")?;
+        let count: i64 = row.try_get("count")?;
+        classifications_created_by_type.insert(classification_type, count);
+    }
+
+    // Get total cumulative classifications created.
+    let classifications_created_total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM domain_classifications")
+            .fetch_one(pool)
+            .await?;
+
+    Ok(MetricsStats {
+        current_classifications_by_type,
+        current_classifications_total: current_total,
+        domains_seen_total,
+        events_by_action,
+        classifications_created_by_type,
+        classifications_created_total,
+    })
 }
 
 #[cfg(test)]

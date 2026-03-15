@@ -30,6 +30,12 @@ const GAMING_SITE_HTML: &str = r#"
 const GAMING_PROMPT_TEMPLATE: &str = r#"
 You are classifying websites to determine if they are gaming-related sites.
 
+Gaming sites are those whose PRIMARY purpose is entertainment and recreation.
+INCLUDE sites that are primarily games, even if they teach skills (e.g., Minecraft,
+Kerbal Space Program, Screeps).
+EXCLUDE educational platforms where learning is the primary goal, even if they use
+gamification (e.g., Duolingo, Khan Academy, Codecademy).
+
 Analyze the following website metadata and determine if this is a gaming site
 (game stores, game streaming platforms, game publishers, gaming communities, etc.):
 

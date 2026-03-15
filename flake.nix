@@ -46,7 +46,13 @@
         buildInputs = devPackages (pkgsFor system);
         shellHook = ''
           echo "DNS Smart Block development environment"
-          echo "Available packages: classifier, log-processor, queue-processor, blocklist-server"
+          echo ""
+          echo "Available Cargo packages (use 'cargo build -p <name>'):"
+          cargo metadata --no-deps --format-version 1 2>/dev/null | \
+            grep -o '"name":"dns-smart-block-[^"]*"' | \
+            cut -d'"' -f4 | \
+            sort | \
+            sed 's/^/  • /'
         '';
       };
     });

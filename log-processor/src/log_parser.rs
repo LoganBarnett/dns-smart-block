@@ -10,6 +10,8 @@ impl LogParser {
   pub fn new() -> Result<Self> {
     // Common DNS log patterns that indicate a successful query
     let patterns = vec![
+      // Blocky DNS format: "question_name=domain. question_type=type"
+      r"question_name=([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)\.",
       // dnsdist query format: "Query from IP:port: domain IN type"
       r"Query from [^\s]+: ([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*) IN",
       // Common DNS log format: "client IP#port (domain)"
@@ -165,5 +167,17 @@ mod tests {
 
     let line = "Query from 192.168.1.100:54321: EXAMPLE.COM IN A";
     assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
+  }
+
+  #[test]
+  fn test_parse_blocky_format() {
+    let parser = LogParser::new().unwrap();
+
+    // Typical Blocky log line
+    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved answer=A (13.107.213.69) client_ip=127.0.0.1 question_name=minecraft.net. question_type=A response_code=NOERROR";
+    assert_eq!(parser.parse_log_line(line), Some("minecraft.net".to_string()));
+
+    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved question_name=steampowered.com. question_type=A";
+    assert_eq!(parser.parse_log_line(line), Some("steampowered.com".to_string()));
   }
 }

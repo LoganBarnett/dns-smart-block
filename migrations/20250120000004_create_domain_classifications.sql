@@ -11,10 +11,11 @@ CREATE TABLE IF NOT EXISTS domain_classifications (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Index for domain lookups with valid classifications
+-- Index for domain lookups with valid classifications.
+-- Note: Cannot use partial index with NOW() as it's not IMMUTABLE.
+-- Query filtering on valid_until should still benefit from this index.
 CREATE INDEX IF NOT EXISTS idx_classifications_domain_valid
-    ON domain_classifications(domain, valid_until DESC)
-    WHERE valid_until > NOW();
+    ON domain_classifications(domain, valid_until DESC);
 
 -- Index for classification type queries
 CREATE INDEX IF NOT EXISTS idx_classifications_type

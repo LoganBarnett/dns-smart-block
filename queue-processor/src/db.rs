@@ -61,6 +61,43 @@ pub async fn get_latest_event(
     }
 }
 
+/// Count consecutive "error" events for a domain.
+/// Returns the number of consecutive errors, starting from the most recent
+/// event.
+pub async fn count_consecutive_errors(
+    pool: &PgPool,
+    domain: &str,
+    limit: i64,
+) -> Result<i64, DbError> {
+    let result = sqlx::query(
+        r#"
+        WITH recent_events AS (
+            SELECT action::text
+            FROM domain_classification_events
+            WHERE domain = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        )
+        SELECT COUNT(*) as error_count
+        FROM recent_events
+        WHERE action = 'error'
+        AND NOT EXISTS (
+            SELECT 1
+            FROM recent_events re2
+            WHERE re2.action != 'error'
+            AND re2.rowid <= recent_events.rowid
+        )
+        "#,
+    )
+    .bind(domain)
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+
+    let count: i64 = result.try_get("error_count")?;
+    Ok(count)
+}
+
 /// Ensure a prompt exists and return its ID
 pub async fn ensure_prompt(
     tx: &mut Transaction<'_, Postgres>,
