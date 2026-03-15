@@ -450,45 +450,39 @@ pub async fn rebuild_projections_from_events(
 mod tests {
   use super::*;
   use chrono::Duration;
+  use serial_test::serial;
 
-  async fn setup_test_db() -> PgPool {
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-      "postgresql://localhost/dns_smart_block_test".to_string()
-    });
+  async fn setup_test_db() -> (dns_smart_block_common::test_db::TestDb, PgPool)
+  {
+    let test_db = dns_smart_block_common::test_db::TestDb::new()
+      .expect("failed to start test db");
+    let pool = test_db.pool().await.expect("failed to get pool");
 
-    let pool = PgPool::connect(&database_url)
+    sqlx::query("DELETE FROM domain_classification_events")
+      .execute(&pool)
       .await
-      .expect("Failed to connect to test database");
-
-    // Run migrations
-    sqlx::migrate!("../migrations")
-      .run(&pool)
-      .await
-      .expect("Failed to run migrations");
-
-    // Clean up test data
+      .expect("Failed to clean events");
     sqlx::query("DELETE FROM domain_classifications")
       .execute(&pool)
       .await
       .expect("Failed to clean classifications");
-
     sqlx::query("DELETE FROM domains")
       .execute(&pool)
       .await
       .expect("Failed to clean domains");
-
     sqlx::query("DELETE FROM prompts")
       .execute(&pool)
       .await
       .expect("Failed to clean prompts");
 
-    pool
+    (test_db, pool)
   }
 
   #[tokio::test]
-  #[ignore] // Requires DATABASE_URL
+  #[serial]
+
   async fn test_get_blocked_domains_at_current_time() {
-    let pool = setup_test_db().await;
+    let (_db, pool) = setup_test_db().await;
 
     // Insert test prompt
     sqlx::query(
@@ -576,9 +570,10 @@ mod tests {
   }
 
   #[tokio::test]
-  #[ignore] // Requires DATABASE_URL
+  #[serial]
+
   async fn test_get_blocked_domains_excludes_expired() {
-    let pool = setup_test_db().await;
+    let (_db, pool) = setup_test_db().await;
 
     // Insert test prompt
     sqlx::query(
@@ -634,9 +629,10 @@ mod tests {
   }
 
   #[tokio::test]
-  #[ignore] // Requires DATABASE_URL
+  #[serial]
+
   async fn test_get_blocked_domains_at_specific_time() {
-    let pool = setup_test_db().await;
+    let (_db, pool) = setup_test_db().await;
 
     // Insert test prompt
     sqlx::query(
@@ -704,6 +700,7 @@ mod tests {
   }
 
   #[tokio::test]
+  #[serial]
   async fn test_rebuild_projections_from_events() {
     let test_db = dns_smart_block_common::test_db::TestDb::new()
       .expect("Failed to setup test database");

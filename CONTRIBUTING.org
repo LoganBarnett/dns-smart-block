@@ -216,11 +216,25 @@ Run all tests across the workspace:
 cargo test --workspace
 #+end_src
 
-Tests that require a live PostgreSQL instance are marked ~#[ignore]~ and can be
-run with:
+** Database integration tests
+
+Database integration tests self-provision a PostgreSQL cluster via
+~TestDb~ (no external setup required) and are annotated with
+~#[serial]~ so they run sequentially within each binary without
+interfering with each other.  They are included in the normal test run:
 
 #+begin_src sh
-cargo test --workspace -- --include-ignored
+cargo test --workspace
+#+end_src
+
+** LLM model-evaluation tests
+
+Tests in ~classifier/tests/model_evaluation_test.rs~ are marked
+~#[ignore]~ because they require a running Ollama instance.  Run them
+manually when needed:
+
+#+begin_src sh
+cargo test --workspace -- --include-ignored --test-threads=1
 #+end_src
 
 ** ~TestDb~

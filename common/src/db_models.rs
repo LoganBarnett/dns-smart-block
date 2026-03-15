@@ -131,10 +131,11 @@ pub struct ClassificationEventInsert {
 }
 
 impl ClassificationEventInsert {
-  /// Insert this event into the database
+  /// Insert this event into the database.  Accepts any Postgres executor so
+  /// callers can pass either a pool or an in-flight transaction.
   pub async fn insert(
     &self,
-    pool: &sqlx::PgPool,
+    executor: impl sqlx::Executor<'_, Database = Postgres>,
   ) -> Result<PgQueryResult, sqlx::Error> {
     sqlx::query(
       r#"
@@ -146,7 +147,7 @@ impl ClassificationEventInsert {
     .bind(&self.action)
     .bind(&self.action_data)
     .bind(self.prompt_id)
-    .execute(pool)
+    .execute(executor)
     .await
   }
 }

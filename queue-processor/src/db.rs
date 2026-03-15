@@ -1,5 +1,5 @@
 use dns_smart_block_common::db_models::ClassificationEventInsert;
-use sqlx::PgPool;
+use sqlx::Postgres;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -11,9 +11,10 @@ pub enum DbError {
   JsonError(#[from] serde_json::Error),
 }
 
-/// Insert a domain_classification_event
+/// Insert a domain_classification_event.  Accepts any Postgres executor so
+/// callers can pass either a pool or an in-flight transaction.
 pub async fn insert_event(
-  pool: &PgPool,
+  executor: impl sqlx::Executor<'_, Database = Postgres>,
   domain: &str,
   action: &str,
   action_data: serde_json::Value,
@@ -26,7 +27,7 @@ pub async fn insert_event(
     prompt_id,
   };
 
-  event.insert(pool).await?;
+  event.insert(executor).await?;
 
   Ok(())
 }

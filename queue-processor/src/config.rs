@@ -235,10 +235,15 @@ impl Config {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tempfile::NamedTempFile;
 
   #[test]
   fn test_parse_valid_config() {
-    let config_content = r#"
+    let gaming = NamedTempFile::new().unwrap();
+    let video = NamedTempFile::new().unwrap();
+
+    let config_content = format!(
+      r#"
 [ollama]
 url = "http://localhost:11434"
 model = "llama3.2:3b"
@@ -253,27 +258,22 @@ ttl_days = 10
 
 [[classifier]]
 name = "gaming"
-prompt_template = "/tmp/gaming.txt"
+prompt_template = "{}"
 
 [[classifier]]
 name = "video-streaming"
-prompt_template = "/tmp/video.txt"
+prompt_template = "{}"
 min_confidence = 0.9
-"#;
+"#,
+      gaming.path().display(),
+      video.path().display()
+    );
 
-    // Create temporary prompt template files.
-    std::fs::write("/tmp/gaming.txt", "test").unwrap();
-    std::fs::write("/tmp/video.txt", "test").unwrap();
-
-    let config: Config = toml::from_str(config_content).unwrap();
+    let config: Config = toml::from_str(&config_content).unwrap();
     assert_eq!(config.classifiers.len(), 2);
     assert_eq!(config.classifiers[0].name, "gaming");
     assert_eq!(config.classifiers[1].name, "video-streaming");
     assert_eq!(config.classifiers[1].min_confidence, Some(0.9));
-
-    // Clean up.
-    std::fs::remove_file("/tmp/gaming.txt").ok();
-    std::fs::remove_file("/tmp/video.txt").ok();
   }
 
   #[test]
@@ -297,21 +297,23 @@ model = "llama3.2:3b"
 
   #[test]
   fn test_invalid_confidence_validation_error() {
-    // Create the prompt template file first so validation gets to the confidence check.
-    std::fs::write("/tmp/gaming.txt", "test").unwrap();
+    let gaming = NamedTempFile::new().unwrap();
 
-    let config_content = r#"
+    let config_content = format!(
+      r#"
 [ollama]
 url = "http://localhost:11434"
 model = "llama3.2:3b"
 
 [[classifier]]
 name = "gaming"
-prompt_template = "/tmp/gaming.txt"
+prompt_template = "{}"
 min_confidence = 1.5
-"#;
+"#,
+      gaming.path().display()
+    );
 
-    let config: Config = toml::from_str(config_content).unwrap();
+    let config: Config = toml::from_str(&config_content).unwrap();
     let result = config.validate();
     assert!(result.is_err());
     let error_msg = result.unwrap_err().to_string();
@@ -320,13 +322,15 @@ min_confidence = 1.5
       "Expected confidence error, got: {}",
       error_msg
     );
-
-    std::fs::remove_file("/tmp/gaming.txt").ok();
   }
 
   #[test]
   fn test_effective_values() {
-    let config_content = r#"
+    let gaming = NamedTempFile::new().unwrap();
+    let video = NamedTempFile::new().unwrap();
+
+    let config_content = format!(
+      r#"
 [ollama]
 url = "http://localhost:11434"
 model = "llama3.2:3b"
@@ -337,19 +341,19 @@ ttl_days = 10
 
 [[classifier]]
 name = "gaming"
-prompt_template = "/tmp/gaming.txt"
+prompt_template = "{}"
 
 [[classifier]]
 name = "video-streaming"
-prompt_template = "/tmp/video.txt"
+prompt_template = "{}"
 min_confidence = 0.9
 ttl_days = 30
-"#;
+"#,
+      gaming.path().display(),
+      video.path().display()
+    );
 
-    std::fs::write("/tmp/gaming.txt", "test").unwrap();
-    std::fs::write("/tmp/video.txt", "test").unwrap();
-
-    let config: Config = toml::from_str(config_content).unwrap();
+    let config: Config = toml::from_str(&config_content).unwrap();
 
     // First classifier uses defaults.
     assert_eq!(
@@ -370,8 +374,5 @@ ttl_days = 30
       config.classifiers[1].effective_ttl_days(&config.defaults),
       30
     );
-
-    std::fs::remove_file("/tmp/gaming.txt").ok();
-    std::fs::remove_file("/tmp/video.txt").ok();
   }
 }

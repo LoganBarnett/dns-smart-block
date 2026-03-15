@@ -4,6 +4,7 @@ resolver = "2"
 
 [workspace.dependencies]
 base64ct = "1.6"
+serial_test = "3"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "migrate"] }
 strum = { version = "0.26", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }

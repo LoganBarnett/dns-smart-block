@@ -30,4 +30,5 @@ url = "*"
 
 [dev-dependencies]
 tempfile = "*"
+serial_test = { workspace = true }
 cargo-husky = { version = "1", features = ["user-hooks"] }

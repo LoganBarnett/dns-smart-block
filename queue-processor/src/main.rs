@@ -322,17 +322,19 @@ async fn process_domain(
           output.classification.confidence
         );
 
-        // Insert "classified" event with full context for reprojection.
-        // Use a transaction to ensure prompt and store prompt_id reference.
+        // Ensure the prompt row and the "classified" event are written
+        // atomically: the event has a FK on prompt_id, so both must land in
+        // the same transaction.
         let mut tx = pool.begin().await?;
-        let prompt = PromptInsert {
+        let prompt_id = PromptInsert {
           content: prompt_template.clone(),
           hash: output.metadata.prompt_hash.clone(),
-        };
-        let prompt_id = prompt.ensure(&mut tx).await?;
+        }
+        .ensure(&mut tx)
+        .await?;
 
         db::insert_event(
-          pool,
+          &mut *tx,
           domain,
           "classified",
           json!({

@@ -33,4 +33,5 @@ url = "*"
 wiremock = "0.5"
 tokio-test = "*"
 tempfile = "*"
+serial_test = { workspace = true }
 cargo-husky = { version = "1", features = ["user-hooks"] }

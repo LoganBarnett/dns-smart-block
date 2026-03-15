@@ -1,48 +1,35 @@
 use dns_smart_block_common::db_models::ClassificationEventInsert;
 use dns_smart_block_log_processor::db::should_queue_domain;
 use serde_json::json;
+use serial_test::serial;
 use sqlx::{PgPool, Row};
 
-/// Helper to set up a test database
-/// Note: This requires DATABASE_URL to be set to a test database
-async fn setup_test_db() -> PgPool {
-  let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-    "postgresql://localhost/dns_smart_block_test".to_string()
-  });
+async fn setup_test_db() -> (dns_smart_block_common::test_db::TestDb, PgPool) {
+  let test_db = dns_smart_block_common::test_db::TestDb::new()
+    .expect("failed to start test db");
+  let pool = test_db.pool().await.expect("failed to get pool");
 
-  let pool = PgPool::connect(&database_url)
-    .await
-    .expect("Failed to connect to test database");
-
-  // Run migrations
-  sqlx::migrate!("../migrations")
-    .run(&pool)
-    .await
-    .expect("Failed to run migrations");
-
-  // Clean up test data
   sqlx::query("DELETE FROM domain_classification_events")
     .execute(&pool)
     .await
     .expect("Failed to clean test data");
-
   sqlx::query("DELETE FROM domain_classifications")
     .execute(&pool)
     .await
     .expect("Failed to clean classifications");
-
   sqlx::query("DELETE FROM domains")
     .execute(&pool)
     .await
     .expect("Failed to clean domains");
 
-  pool
+  (test_db, pool)
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_should_queue_domain_when_no_events() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   // Domain with no events should be queued
   let should_queue = should_queue_domain(&pool, "new-domain.com")
@@ -53,9 +40,10 @@ async fn test_should_queue_domain_when_no_events() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_should_not_queue_when_already_queued() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "already-queued.com";
 
@@ -82,9 +70,10 @@ async fn test_should_not_queue_when_already_queued() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_should_not_queue_when_classifying() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "being-classified.com";
 
@@ -113,9 +102,10 @@ async fn test_should_not_queue_when_classifying() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_should_not_queue_when_error() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "error-domain.com";
 
@@ -144,9 +134,10 @@ async fn test_should_not_queue_when_error() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_should_queue_when_classification_expired() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "expired-classification.com";
 
@@ -200,9 +191,10 @@ async fn test_should_queue_when_classification_expired() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_insert_queued_event() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "test-domain.com";
 

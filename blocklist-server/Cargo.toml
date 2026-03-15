@@ -25,4 +25,5 @@ serde_json = "*"
 
 [dev-dependencies]
 axum-test = "*"
+serial_test = { workspace = true }
 cargo-husky = { version = "1", features = ["user-hooks"] }

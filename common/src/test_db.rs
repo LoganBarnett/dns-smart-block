@@ -13,7 +13,6 @@ static PG_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 pub struct TestDb {
   data_dir: PathBuf,
   port: u16,
-  started_by_us: bool,
 }
 
 impl TestDb {
@@ -34,8 +33,6 @@ impl TestDb {
     let data_dir = project_root.join("test-postgres-data");
     let port = 15432; // Use non-standard port to avoid conflicts
 
-    let started_by_us = INIT.is_completed();
-
     INIT.call_once(|| {
       if let Err(e) = Self::ensure_postgres_running(&data_dir, port) {
         eprintln!("Failed to start PostgreSQL: {}", e);
@@ -43,11 +40,7 @@ impl TestDb {
       }
     });
 
-    Ok(TestDb {
-      data_dir,
-      port,
-      started_by_us: !started_by_us,
-    })
+    Ok(TestDb { data_dir, port })
   }
 
   /// Ensure PostgreSQL is running, starting it if necessary.
@@ -189,20 +182,10 @@ impl TestDb {
 
 impl Drop for TestDb {
   fn drop(&mut self) {
-    if self.started_by_us {
-      // Stop PostgreSQL if we started it
-      if let Ok(mut guard) = PG_PROCESS.lock() {
-        if let Some(mut child) = guard.take() {
-          println!("Stopping test PostgreSQL instance...");
-          let _ = child.kill();
-          let _ = child.wait();
-
-          // Remove PID file so subsequent tests don't think PostgreSQL is
-          // still running.
-          let pid_file = self.data_dir.join("postmaster.pid");
-          let _ = std::fs::remove_file(pid_file);
-        }
-      }
-    }
+    // PostgreSQL is intentionally left running so that multiple tests within
+    // the same binary (which share the Once-initialized cluster) can all use
+    // it without the first test to finish tearing it down for the rest.
+    // The process is an OS-level child and will be cleaned up when the test
+    // binary exits or when the developer runs `pg_ctl stop`.
   }
 }

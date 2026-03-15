@@ -1,55 +1,41 @@
 use dns_smart_block_common::db_models::{
-  ClassifierState, classification_store,
+  ClassifierState, PromptInsert, classification_store,
 };
 use dns_smart_block_queue_processor::db::insert_event;
 use serde_json::json;
+use serial_test::serial;
 use sqlx::{PgPool, Row};
 
-/// Helper to set up a test database
-/// Note: This requires DATABASE_URL to be set to a test database
-async fn setup_test_db() -> PgPool {
-  let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-    "postgresql://localhost/dns_smart_block_test".to_string()
-  });
+async fn setup_test_db() -> (dns_smart_block_common::test_db::TestDb, PgPool) {
+  let test_db = dns_smart_block_common::test_db::TestDb::new()
+    .expect("failed to start test db");
+  let pool = test_db.pool().await.expect("failed to get pool");
 
-  let pool = PgPool::connect(&database_url)
-    .await
-    .expect("Failed to connect to test database");
-
-  // Run migrations
-  sqlx::migrate!("../migrations")
-    .run(&pool)
-    .await
-    .expect("Failed to run migrations");
-
-  // Clean up test data
   sqlx::query("DELETE FROM domain_classification_events")
     .execute(&pool)
     .await
     .expect("Failed to clean test data");
-
   sqlx::query("DELETE FROM domain_classifications")
     .execute(&pool)
     .await
     .expect("Failed to clean classifications");
-
   sqlx::query("DELETE FROM domains")
     .execute(&pool)
     .await
     .expect("Failed to clean domains");
-
   sqlx::query("DELETE FROM prompts")
     .execute(&pool)
     .await
     .expect("Failed to clean prompts");
 
-  pool
+  (test_db, pool)
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_insert_event_classifying() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "test-domain.com";
   let action_data = json!({
@@ -85,9 +71,10 @@ async fn test_insert_event_classifying() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_insert_event_classified() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "classified-domain.com";
   let action_data = json!({
@@ -123,9 +110,10 @@ async fn test_insert_event_classified() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_insert_event_error() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "error-domain.com";
   let action_data = json!({
@@ -159,9 +147,10 @@ async fn test_insert_event_error() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_classification_store() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "gaming-site.com";
   let classification_type = "gaming";
@@ -257,9 +246,10 @@ async fn test_classification_store() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_update_projections_deduplicates_prompts() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain1 = "domain1.com";
   let domain2 = "domain2.com";
@@ -350,9 +340,10 @@ async fn test_update_projections_deduplicates_prompts() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_upsert_domain_updates_timestamp() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "timestamp-test.com";
 
@@ -431,9 +422,10 @@ async fn test_upsert_domain_updates_timestamp() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_get_classifier_states_all_missing() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "new-domain.com";
   let classification_types =
@@ -452,9 +444,10 @@ async fn test_get_classifier_states_all_missing() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_get_classifier_states_current() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "current-domain.com";
   let classification_types = vec!["gaming".to_string()];
@@ -486,9 +479,10 @@ async fn test_get_classifier_states_current() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_get_classifier_states_expired() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "expired-domain.com";
   let classification_types = vec!["gaming".to_string()];
@@ -548,9 +542,10 @@ async fn test_get_classifier_states_expired() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_get_classifier_states_error() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "error-domain.com";
   let classification_types = vec!["gaming".to_string()];
@@ -580,9 +575,10 @@ async fn test_get_classifier_states_error() {
 }
 
 #[tokio::test]
-#[ignore] // Requires DATABASE_URL
+#[serial]
+
 async fn test_get_classifier_states_mixed() {
-  let pool = setup_test_db().await;
+  let (_db, pool) = setup_test_db().await;
 
   let domain = "mixed-domain.com";
   let classification_types = vec![
@@ -689,4 +685,124 @@ async fn test_get_classifier_states_mixed() {
   assert_eq!(video_state.1, ClassifierState::Error);
   assert_eq!(social_state.1, ClassifierState::Expired);
   assert_eq!(news_state.1, ClassifierState::Missing);
+}
+
+// Regression: prompt insert and classified event must share a transaction so
+// the event's prompt_id FK is satisfied atomically.  Previously insert_event
+// was called with `pool` instead of the in-flight `&mut *tx`, meaning the two
+// writes could diverge if the transaction was rolled back.
+#[tokio::test]
+#[serial]
+
+async fn test_classified_event_and_prompt_share_transaction() {
+  let (_db, pool) = setup_test_db().await;
+
+  let domain = "atomic-test.com";
+  let prompt_content = "Is this a gaming site?";
+  let prompt_hash = "sha256:atomictest";
+
+  // Simulate the queue-processor flow: open a transaction, ensure the prompt,
+  // then insert the classified event — both within the same transaction.
+  let mut tx = pool.begin().await.expect("Failed to begin transaction");
+
+  let prompt_id = PromptInsert {
+    content: prompt_content.to_string(),
+    hash: prompt_hash.to_string(),
+  }
+  .ensure(&mut tx)
+  .await
+  .expect("Failed to ensure prompt");
+
+  insert_event(
+    &mut *tx,
+    domain,
+    "classified",
+    json!({
+      "classification_type": "gaming",
+      "is_matching_site": true,
+      "confidence": 0.92,
+    }),
+    Some(prompt_id),
+  )
+  .await
+  .expect("Failed to insert classified event");
+
+  tx.commit().await.expect("Failed to commit transaction");
+
+  // Prompt must be persisted with its hash.
+  let stored_hash: String =
+    sqlx::query_scalar("SELECT hash FROM prompts WHERE id = $1")
+      .bind(prompt_id)
+      .fetch_one(&pool)
+      .await
+      .expect("Prompt not found after commit");
+
+  assert_eq!(stored_hash, prompt_hash, "Prompt hash should be stored");
+
+  // Event must reference the correct prompt_id.
+  let event_prompt_id: Option<i32> = sqlx::query_scalar(
+    "SELECT prompt_id FROM domain_classification_events WHERE domain = $1",
+  )
+  .bind(domain)
+  .fetch_one(&pool)
+  .await
+  .expect("Event not found after commit");
+
+  assert_eq!(
+    event_prompt_id,
+    Some(prompt_id),
+    "Classified event should reference the prompt"
+  );
+}
+
+#[tokio::test]
+#[serial]
+
+async fn test_classified_event_rolls_back_with_prompt() {
+  let (_db, pool) = setup_test_db().await;
+
+  let domain = "rollback-test.com";
+  let prompt_hash = "sha256:rollbacktest";
+
+  let mut tx = pool.begin().await.expect("Failed to begin transaction");
+
+  let prompt_id = PromptInsert {
+    content: "Rollback test prompt".to_string(),
+    hash: prompt_hash.to_string(),
+  }
+  .ensure(&mut tx)
+  .await
+  .expect("Failed to ensure prompt");
+
+  insert_event(
+    &mut *tx,
+    domain,
+    "classified",
+    json!({"classification_type": "gaming", "confidence": 0.9}),
+    Some(prompt_id),
+  )
+  .await
+  .expect("Failed to insert event within transaction");
+
+  // Drop without committing — both writes must be rolled back.
+  drop(tx);
+
+  let prompt_count: i64 =
+    sqlx::query_scalar("SELECT COUNT(*) FROM prompts WHERE hash = $1")
+      .bind(prompt_hash)
+      .fetch_one(&pool)
+      .await
+      .expect("Failed to count prompts");
+
+  assert_eq!(prompt_count, 0, "Rolled-back prompt must not be persisted");
+
+  let event_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM domain_classification_events WHERE domain = $1",
+  )
+  .bind(domain)
+  .fetch_one(&pool)
+  .await
+  .expect("Failed to count events");
+
+  assert_eq!(event_count, 0, "Rolled-back event must not be persisted");
 }
