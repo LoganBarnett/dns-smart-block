@@ -127,19 +127,17 @@ dns_handle -> parallel_flows.dns_log
 Watches DNS server logs and queues domains for classification.
 
 *** Features
-- Watches log files or command output (e.g., ~journalctl~)
-- Parses multiple DNS log formats
-- Deduplicates domains in memory
-- Checks database to avoid re-queuing already classified domains
-- Publishes to NATS queue
+- Watches log files or command output (e.g., ~journalctl~).
+- Configurable regex pattern and optional line filter for any DNS log format.
+- Publishes to NATS queue.
 
 *** Usage
 #+begin_src sh :exports code
 dns-smart-block-log-processor \
-  --log-source "cmd:journalctl -f -u dns-server" \
-  --nats-url "nats://localhost:4222" \
-  --database-url "postgresql://user@localhost/dns_smart_block" \
-  --database-password-file "/run/secrets/db-password"
+  --log-source "cmd:journalctl --follow --unit=blocky.service" \
+  --domain-pattern 'question_name=(\w(?:[\w-]*\w)?(?:\.\w(?:[\w-]*\w)?)+)\.' \
+  --line-filter 'response_type=RESOLVED' \
+  --nats-url "nats://localhost:4222"
 #+end_src
 
 ** Queue Processor
@@ -147,11 +145,11 @@ dns-smart-block-log-processor \
 Processes queued domains: fetches content, classifies with LLM, stores results.
 
 *** Features
-- Consumes from NATS queue
-- Runs classifier as subprocess for isolation
-- Stores classifications with TTL (configurable, default 10 days)
-- Event-sourced database design (immutable event log)
-- Confidence threshold filtering
+- Consumes from NATS queue.
+- Runs classifier as subprocess for isolation.
+- Stores classifications with TTL (configurable, default 10 days).
+- Event-sourced database design (immutable event log).
+- Confidence threshold filtering.
 
 *** Usage
 #+begin_src sh :exports code
@@ -173,10 +171,10 @@ dns-smart-block-queue-processor \
 HTTP API for serving DNS blocklists.
 
 *** Features
-- Plain text output (one domain per line)
-- Filter by classification type (gaming, news, sports, etc.)
-- Point-in-time queries via ~at~ parameter
-- Compatible with any DNS server that supports HTTP blocklists
+- Plain text output (one domain per line).
+- Filter by classification type (gaming, news, sports, etc.).
+- Point-in-time queries via ~at~ parameter.
+- Compatible with any DNS server that supports HTTP blocklists.
 
 *** Usage
 #+begin_src sh :exports code
@@ -191,8 +189,8 @@ dns-smart-block-blocklist-server \
 **** GET /blocklist
 
 Query parameters:
-- ~type~ (required): Classification type (e.g., "gaming", "news", "sports")
-- ~at~ (optional): ISO 8601 timestamp for historical queries (defaults to now)
+- ~type~ (required): Classification type (e.g., "gaming", "news", "sports").
+- ~at~ (optional): ISO 8601 timestamp for historical queries (defaults to now).
 
 Examples:
 #+begin_src sh :exports code
@@ -222,12 +220,12 @@ Health check endpoint.
 Standalone binary that fetches a domain and classifies it using an LLM.
 
 *** Features
-- HTTP GET with redirect following
-- HTML metadata extraction (title, description, Open Graph tags)
-- LLM classification via Ollama
-- JSON output for machine parsing
-- Semantic error types
-- Prompt hash computation for deduplication
+- HTTP GET with redirect following.
+- HTML metadata extraction (title, description, Open Graph tags).
+- LLM classification via Ollama.
+- JSON output for machine parsing.
+- Semantic error types.
+- Prompt hash computation for deduplication.
 
 *** Usage
 #+begin_src sh :exports code
@@ -292,8 +290,8 @@ unbound-control reload
 
 These DNS servers support direct HTTP blocklist URLs:
 
-- Pi-hole: Add ~http://localhost:3000/blocklist?type=gaming~ to blocklists
-- AdGuard Home: Add to DNS blocklists in settings
+- Pi-hole: Add ~http://localhost:3000/blocklist?type=gaming~ to blocklists.
+- AdGuard Home: Add to DNS blocklists in settings.
 
 * Host Configuration
 
@@ -318,8 +316,8 @@ Add to your NixOS flake configuration:
           services.dns-smart-block = {
             enable = true;
 
-            # Watch DNS server logs via journalctl
-            logProcessor.logSource = "cmd:journalctl -f -u dns-server";
+            # Watch DNS server logs via journalctl (see integrations.blocky for defaults)
+            logProcessor.logSource = "cmd:journalctl --follow --unit=blocky.service";
 
             # LLM configuration
             ollama.url = "http://localhost:11434";
@@ -344,17 +342,17 @@ Add to your NixOS flake configuration:
 The NixOS module provides:
 
 - *Built-in NATS server* - Dedicated instance that won't conflict with
-  other NATS services
-- *Built-in PostgreSQL* - Automatic database setup with peer authentication
+  other NATS services.
+- *Built-in PostgreSQL* - Automatic database setup with peer authentication.
 - *Systemd services* - Automatically configured log-processor, queue-processor,
-  and blocklist-server
+  and blocklist-server.
 - *Security hardening* - Services run as DynamicUser with restricted
-  permissions
+  permissions.
 - *Proper permissions* - Log-processor gets =systemd-journal= group for
-  reading logs
+  reading logs.
 - *Flexible log sources* - Support for both journalctl and file-based
-  log watching
-- *Secret management* - Compatible with agenix, sops-nix for passwords
+  log watching.
+- *Secret management* - Compatible with agenix, sops-nix for passwords.
 
 *** Configuration Options
 
@@ -375,7 +373,9 @@ services.dns-smart-block = {
 
   # Log processor
   logProcessor.enable = true;
-  logProcessor.logSource = "cmd:journalctl -f -u dns-server";
+  logProcessor.logSource = "cmd:journalctl --follow --unit=blocky.service";
+  logProcessor.domainPattern = 'question_name=(\w(?:[\w-]*\w)?(?:\.\w(?:[\w-]*\w)?)+)\.';
+  logProcessor.lineFilter = "response_type=RESOLVED";
 
   # Queue processor
   queueProcessor.enable = true;
@@ -415,10 +415,10 @@ DNS Smart Block uses PostgreSQL with an event-sourced architecture.
 
 ** Tables
 
-- *prompts* - Stores LLM prompts with SHA256 hash deduplication
-- *domain_classification_events* - Immutable event log (queued, classifying, classified, error)
-- *domains* - Projection table for fast domain lookups
-- *domain_classifications* - Classification results with TTL (valid_on, valid_until)
+- *prompts* - Stores LLM prompts with SHA256 hash deduplication.
+- *domain_classification_events* - Immutable event log (queued, classifying, classified, error).
+- *domains* - Projection table for fast domain lookups.
+- *domain_classifications* - Classification results with TTL (valid_on, valid_until).
 
 ** Migrations
 
@@ -460,6 +460,55 @@ DATABASE_URL="postgresql://localhost/dns_smart_block_test" \
 #+begin_src sh :exports code
 nix develop
 #+end_src
+
+* Roadmap
+
+** Mode B: DNS Proxy
+
+Rather than tailing DNS server logs, dns-smart-block would operate as a DNS
+proxy that sits between clients and the upstream DNS server (Blocky, Pi-hole,
+Unbound, etc.).  The proxy intercepts every query, forwards it upstream to get
+the real response, and enqueues the domain for classification as a side effect.
+
+Benefits over the current log-tailing approach:
+
+- No log format to parse or configure — the DNS response is available
+  directly in memory.
+- The resolved IP(s) are immediately available, so the classifier can fetch
+  the domain's content by IP directly rather than re-resolving through the
+  local DNS stack.  This avoids spurious log entries from the classifier's
+  own HTTP fetch.
+- NXDOMAIN is authoritative — no ambiguity about whether a sinkhole response
+  (e.g. 0.0.0.0) means blocked or non-existent.
+- Scales cleanly to multiple queue-processor workers without the duplicate-
+  enqueue risk present in the log-tailing approach.
+
+Client identity (for upstreams that do per-client blocking, like Blocky) is
+preserved via EDNS Client Subnet (RFC 7871): the proxy adds the original
+client's /32 IP as an ECS option on every forwarded query.  Blocky's
+~useAsClient~ option treats this as the real client identity.
+
+** Mode C: Standalone DNS Server
+
+In environments where deploying a separate DNS server (Blocky, Pi-hole, etc.)
+is impractical, dns-smart-block could operate as a full DNS server.  It would
+serve block responses for classified domains directly from its own database,
+and forward everything else to configured upstream resolvers (plain IP:port,
+DoT, or DoH).
+
+This mode removes the dependency on any external DNS server and makes
+dns-smart-block a self-contained solution.  It is the target architecture for
+managed deployments (e.g. school environments) where minimising the number of
+components is important.
+
+** CoreDNS Plugin
+
+CoreDNS is a plugin-based DNS server used widely in production (including as
+the default DNS server in Kubernetes).  A dns-smart-block CoreDNS plugin could
+hook into the response path and post domain + resolved-IP information to the
+queue-processor API, providing the same benefits as Mode B without requiring
+dns-smart-block to implement its own DNS proxy layer.  This would be a lower-
+friction integration for organisations already running CoreDNS.
 
 * License
 
