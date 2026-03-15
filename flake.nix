@@ -28,12 +28,14 @@
         ];
       };
     in [
-      rust
       pkgs.cargo-sweep
-      pkgs.pkg-config
-      pkgs.openssl
-      pkgs.postgresql
       pkgs.jq
+      # Doesn't build on my system presently (what?).
+      # pkgs.ollama
+      pkgs.openssl
+      pkgs.pkg-config
+      pkgs.postgresql
+      rust
     ];
   in {
 
@@ -65,6 +67,7 @@
       log-processor = dnsSmartBlock.log-processor;
       queue-processor = dnsSmartBlock.queue-processor;
       blocklist-server = dnsSmartBlock.blocklist-server;
+      cli = dnsSmartBlock.cli;
 
       # Default to building all
       default = dnsSmartBlock.all;
@@ -75,6 +78,7 @@
       dns-smart-block-log-processor = self.packages.${final.system}.log-processor;
       dns-smart-block-queue-processor = self.packages.${final.system}.queue-processor;
       dns-smart-block-blocklist-server = self.packages.${final.system}.blocklist-server;
+      dns-smart-block-cli = self.packages.${final.system}.cli;
     };
 
     # Apps for easy running
@@ -94,6 +98,10 @@
       blocklist-server = {
         type = "app";
         program = "${self.packages.${system}.blocklist-server}/bin/dns-smart-block-blocklist-server";
+      };
+      cli = {
+        type = "app";
+        program = "${self.packages.${system}.cli}/bin/dns-smart-block-cli";
       };
     });
 

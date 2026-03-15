@@ -129,6 +129,19 @@ let
     };
   });
 
+  cli = craneLib.buildPackage (commonArgs // {
+    pname = "dns-smart-block-cli";
+    version = "0.1.0";
+    cargoExtraArgs = "--package dns-smart-block-cli";
+
+    meta = {
+      description = "DNS Smart Block CLI - Administrative command-line interface";
+      homepage = "https://github.com/yourusername/dns-smart-block";
+      license = lib.licenses.mit;
+      maintainers = [ ];
+    };
+  });
+
   # Combine all packages
   all = pkgs.symlinkJoin {
     name = "dns-smart-block-all";
@@ -137,9 +150,10 @@ let
       log-processor
       queue-processor
       blocklist-server
+      cli
     ];
   };
 in
 {
-  inherit classifier log-processor queue-processor blocklist-server all;
+  inherit classifier log-processor queue-processor blocklist-server cli all;
 }
