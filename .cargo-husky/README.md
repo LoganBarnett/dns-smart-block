@@ -21,9 +21,12 @@ cargo test
 ## What the pre-commit hook does
 
 Before each commit, the hook will:
-1. Run `cargo fmt --all --check` to verify all Rust code is properly formatted
-2. If the code is not formatted, the commit will be blocked with an error message
-3. You can then run `cargo fmt --all` to format the code and try committing again
+1. Identify which Rust files (`.rs`) are staged for commit
+2. Run `rustfmt` on only those staged files
+3. Re-stage the formatted versions of those files
+4. Proceed with the commit, ensuring all committed code is properly formatted
+
+Note: Only files you've staged for commit will be formatted and included. Other files in your working directory remain untouched.
 
 ## Bypassing the hook (not recommended)
 
