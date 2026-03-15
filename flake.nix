@@ -76,11 +76,11 @@
     });
 
     overlays.default = final: prev: {
-      dns-smart-block-classifier = self.packages.${final.system}.classifier;
-      dns-smart-block-log-processor = self.packages.${final.system}.log-processor;
-      dns-smart-block-queue-processor = self.packages.${final.system}.queue-processor;
-      dns-smart-block-blocklist-server = self.packages.${final.system}.blocklist-server;
-      dns-smart-block-cli = self.packages.${final.system}.cli;
+      dns-smart-block-classifier = self.packages.${final.stdenv.hostPlatform.system}.classifier;
+      dns-smart-block-log-processor = self.packages.${final.stdenv.hostPlatform.system}.log-processor;
+      dns-smart-block-queue-processor = self.packages.${final.stdenv.hostPlatform.system}.queue-processor;
+      dns-smart-block-blocklist-server = self.packages.${final.stdenv.hostPlatform.system}.blocklist-server;
+      dns-smart-block-cli = self.packages.${final.stdenv.hostPlatform.system}.cli;
     };
 
     # Apps for easy running
