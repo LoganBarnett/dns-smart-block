@@ -143,6 +143,16 @@ in {
           concurrency will be (number of enabled classifiers × maxAckPending).
         '';
       };
+
+      maxFileStore = mkOption {
+        type = types.str;
+        default = "1GB";
+        description = ''
+          Maximum file storage for JetStream across all streams on this NATS
+          server.  Increase this when sharing the NATS instance with other
+          services that also create JetStream streams.
+        '';
+      };
     };
 
     # Log Processor Configuration
@@ -544,9 +554,9 @@ in {
             # Store JetStream data in the configured directory.
             store_dir: "${cfg.nats.dataDir}"
 
-            # Maximum storage size for JetStream (1GB).
-            max_memory_store: 1GB
-            max_file_store: 1GB
+            # Maximum storage size for JetStream.
+            max_memory_store: ${cfg.nats.maxFileStore}
+            max_file_store: ${cfg.nats.maxFileStore}
           }
 
           # Define a stream for domain classification messages.
