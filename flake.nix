@@ -39,6 +39,7 @@
       pkgs.pkg-config
       pkgs.openssl
       pkgs.postgresql
+      pkgs.jq
     ];
   in {
 
@@ -50,8 +51,7 @@
           echo ""
           echo "Available Cargo packages (use 'cargo build -p <name>'):"
           cargo metadata --no-deps --format-version 1 2>/dev/null | \
-            grep -o '"name":"dns-smart-block-[^"]*"' | \
-            cut -d'"' -f4 | \
+            jq -r '.packages[].name | select(startswith("dns-smart-block-"))' | \
             sort | \
             sed 's/^/  • /'
         '';
