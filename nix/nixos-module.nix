@@ -567,8 +567,10 @@ in {
         description = "DNS Smart Block Blocklist Server";
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ]
-                ++ lib.optional cfg.database.enable "postgresql.service";
-        wants = lib.optional cfg.database.enable "postgresql.service";
+                ++ lib.optional cfg.database.enable "postgresql.service"
+                ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service";
+        wants = lib.optional cfg.database.enable "postgresql.service"
+                ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service";
         requires = lib.optional cfg.database.enable "postgresql.service";
 
         serviceConfig = {
@@ -584,6 +586,8 @@ in {
               "--database-url '${databaseUrl}'"
               "--public-bind-address '${publicBindAddress}'"
               "--admin-bind-address '${adminBindAddress}'"
+              "--nats-url '${cfg.nats.url}'"
+              "--nats-subject '${cfg.nats.subject}'"
             ] ++ lib.optionals (cfg.database.passwordFile != null) [
               "--database-password-file '${cfg.database.passwordFile}'"
             ]);
