@@ -92,7 +92,7 @@ pub async fn classification_store(
 /// an exclude suffix, without invoking the LLM.  The domain upsert, source
 /// ensure, projection insert, and audit event are all written atomically in a
 /// single transaction so the record is always consistent.
-pub async fn apply_exclude_rule(
+pub async fn exclude_rule_classify(
   domain: &str,
   classification_type: &str,
   matched_suffix: &str,
@@ -151,6 +151,59 @@ pub async fn apply_exclude_rule(
   Ok(())
 }
 
+/// Writes a synthetic "not matching" classification for a domain that returned
+/// NXDOMAIN during DNS resolution, without invoking the LLM.  The domain
+/// upsert, source insert, projection, and audit event are written atomically.
+pub async fn dns_nxdomain_classify(
+  domain: &str,
+  classification_type: &str,
+  pool: &PgPool,
+  ttl_days: i64,
+) -> Result<(), DbError> {
+  let now = Utc::now();
+  let mut tx = pool.begin().await?;
+
+  DomainUpsert {
+    domain: domain.to_string(),
+  }
+  .upsert(&mut tx)
+  .await?;
+
+  let source_id = ClassificationSource::dns_nxdomain_insert(&mut tx).await?;
+
+  ClassificationInsert {
+    domain: domain.to_string(),
+    classification_type: classification_type.to_string(),
+    is_matching_site: false,
+    confidence: 1.0,
+    reasoning: Some("Domain does not exist (NXDOMAIN).".to_string()),
+    valid_on: now,
+    valid_until: now + Duration::days(ttl_days),
+    model: "dns-nxdomain".to_string(),
+    source_id: Some(source_id),
+  }
+  .insert(&mut tx)
+  .await?;
+
+  insert_event(
+    &mut *tx,
+    domain,
+    "classified",
+    json!({
+      "classification_type": classification_type,
+      "is_matching_site": false,
+      "confidence": 1.0,
+      "reasoning": "Domain does not exist (NXDOMAIN).",
+      "model": "dns-nxdomain",
+    }),
+    Some(source_id),
+  )
+  .await?;
+
+  tx.commit().await?;
+  Ok(())
+}
+
 /// Write a manual admin classification for a domain.  Creates an `admin`
 /// source row tied to the given user, inserts a projection, and appends a
 /// `classified` event — all atomically in one transaction.
@@ -181,7 +234,7 @@ pub async fn apply_admin_classification(
   .upsert(&mut tx)
   .await?;
 
-  let source_id = ClassificationSource::insert_admin(user_id, &mut tx).await?;
+  let source_id = ClassificationSource::admin_insert(user_id, &mut tx).await?;
 
   let now = Utc::now();
   let valid_until = match ttl_days {

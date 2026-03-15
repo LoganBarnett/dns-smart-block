@@ -27,6 +27,7 @@ strum = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
 url = "*"
+hickory-resolver = { version = "*", features = ["tokio-runtime"] }
 
 [dev-dependencies]
 tempfile = "*"

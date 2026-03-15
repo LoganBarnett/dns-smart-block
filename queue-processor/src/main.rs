@@ -11,9 +11,14 @@ use dns_smart_block_classifier::{
 };
 use dns_smart_block_common::db::{
   ClassificationSource, ClassifierState, PromptInsert, classification_store,
+  dns_nxdomain_classify,
 };
 use dns_smart_block_common::logging::LoggingArgs;
 use futures::StreamExt;
+use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::error::ResolveErrorKind;
+use hickory_resolver::proto::op::ResponseCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
@@ -68,6 +73,34 @@ struct CliArgs {
 struct DomainMessage {
   domain: String,
   timestamp: i64,
+}
+
+enum DnsOutcome {
+  /// Domain has at least one address record — proceed to LLM classification.
+  Resolves,
+  /// Authoritative NXDOMAIN — domain does not exist.
+  Nxdomain,
+  /// Transient failure (SERVFAIL, timeout, …) — skip this message and let it
+  /// be retried naturally on the next log entry for the domain.
+  TransientError(String),
+}
+
+async fn dns_check(resolver: &TokioAsyncResolver, domain: &str) -> DnsOutcome {
+  match resolver.lookup_ip(domain).await {
+    Ok(_) => DnsOutcome::Resolves,
+    Err(e) => match e.kind() {
+      ResolveErrorKind::NoRecordsFound { response_code, .. }
+        if *response_code == ResponseCode::NXDomain =>
+      {
+        DnsOutcome::Nxdomain
+      }
+      // Any other NoRecordsFound (e.g. NODATA — domain exists, no A/AAAA)
+      // is treated as "resolves" so we attempt LLM classification rather
+      // than silently blackholing the domain.
+      ResolveErrorKind::NoRecordsFound { .. } => DnsOutcome::Resolves,
+      _ => DnsOutcome::TransientError(e.to_string()),
+    },
+  }
 }
 
 #[derive(Error, Debug)]
@@ -223,6 +256,7 @@ async fn process_domain(
   config: &Config,
   pool: &PgPool,
   classifier_path: &str,
+  resolver: &TokioAsyncResolver,
 ) -> Result<()> {
   info!("Processing domain: {}", domain);
 
@@ -258,7 +292,7 @@ async fn process_domain(
         .find(|c| &c.name == classification_type)
         .map(|c| c.effective_ttl_days(&config.defaults))
         .unwrap_or(config.defaults.ttl_days);
-      db::apply_exclude_rule(
+      db::exclude_rule_classify(
         domain,
         classification_type,
         matched_suffix,
@@ -268,6 +302,41 @@ async fn process_domain(
       .await?;
     }
     return Ok(());
+  }
+
+  // DNS guard: verify the domain resolves before spending LLM resources.
+  // NXDOMAIN means the domain genuinely does not exist — record a synthetic
+  // "not matching" classification and stop.  Transient failures (SERVFAIL,
+  // timeout) are skipped so the domain can be retried on the next log entry.
+  match dns_check(resolver, domain).await {
+    DnsOutcome::Nxdomain => {
+      info!(
+        "Domain {} returned NXDOMAIN — classifying as non-matching for all classifiers",
+        domain
+      );
+      for (classification_type, state) in &states {
+        if *state == ClassifierState::Current {
+          continue;
+        }
+        let ttl_days = config
+          .classifiers
+          .iter()
+          .find(|c| &c.name == classification_type)
+          .map(|c| c.effective_ttl_days(&config.defaults))
+          .unwrap_or(config.defaults.ttl_days);
+        dns_nxdomain_classify(domain, classification_type, pool, ttl_days)
+          .await?;
+      }
+      return Ok(());
+    }
+    DnsOutcome::TransientError(msg) => {
+      warn!(
+        "DNS check for {} failed transiently ({}), skipping this message",
+        domain, msg
+      );
+      return Ok(());
+    }
+    DnsOutcome::Resolves => {}
   }
 
   // Process each classifier based on its state.
@@ -500,6 +569,26 @@ async fn main() -> Result<()> {
 
   info!("Database URL: {}", sanitize_database_url(&database_url));
 
+  // Build DNS resolver using the system configuration so it respects
+  // /etc/resolv.conf (important on NixOS where the resolver is system-managed).
+  // Falls back to public resolvers if the system config cannot be read.
+  let resolver = {
+    match hickory_resolver::system_conf::read_system_conf() {
+      Ok((config, opts)) => TokioAsyncResolver::tokio(config, opts),
+      Err(e) => {
+        warn!(
+          "Could not read system DNS config ({}), falling back to defaults",
+          e
+        );
+        TokioAsyncResolver::tokio(
+          ResolverConfig::default(),
+          ResolverOpts::default(),
+        )
+      }
+    }
+  };
+  info!("DNS resolver initialised");
+
   // Connect to PostgreSQL
   info!("Connecting to PostgreSQL...");
   let pool = PgPool::connect(&database_url).await?;
@@ -579,6 +668,7 @@ async fn main() -> Result<()> {
           &config,
           &pool,
           &args.classifier_path,
+          &resolver,
         )
         .await
         {

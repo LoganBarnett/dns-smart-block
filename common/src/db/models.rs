@@ -399,7 +399,7 @@ impl ClassificationSource {
   /// Insert a new admin source record for the given user.
   /// Each admin classification action creates its own source row (no dedup —
   /// each decision is a distinct provenance event).
-  pub async fn insert_admin(
+  pub async fn admin_insert(
     user_id: i32,
     tx: &mut Transaction<'_, Postgres>,
   ) -> Result<i32, sqlx::Error> {
@@ -434,6 +434,25 @@ impl ClassificationSource {
 
     let result: (i32,) = sqlx::query_as(
       "SELECT id FROM classification_sources WHERE source_type = 'provisioned'",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(result.0)
+  }
+
+  /// Insert a new dns_nxdomain source record.
+  /// Created each time a domain resolves to NXDOMAIN — not deduped, because
+  /// the check is a per-run event and the result may change over time.
+  pub async fn dns_nxdomain_insert(
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<i32, sqlx::Error> {
+    let result: (i32,) = sqlx::query_as(
+      r#"
+      INSERT INTO classification_sources (source_type, created_at)
+      VALUES ('dns_nxdomain', NOW())
+      RETURNING id
+      "#,
     )
     .fetch_one(&mut **tx)
     .await?;

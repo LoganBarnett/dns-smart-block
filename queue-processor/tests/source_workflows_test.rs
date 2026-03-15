@@ -3,7 +3,9 @@ use dns_smart_block_common::db::{
   apply_admin_classification, classification_store,
   reconcile_provisioned_classifications,
 };
-use dns_smart_block_queue_processor::db::{apply_exclude_rule, insert_event};
+use dns_smart_block_queue_processor::db::{
+  exclude_rule_classify, insert_event,
+};
 use serde_json::json;
 use serial_test::serial;
 use sqlx::{PgPool, Row};
@@ -48,9 +50,9 @@ async fn test_exclude_rule_creates_correct_source() {
   let classification_type = "gaming";
   let matched_suffix = ".example.com";
 
-  apply_exclude_rule(domain, classification_type, matched_suffix, &pool, 30)
+  exclude_rule_classify(domain, classification_type, matched_suffix, &pool, 30)
     .await
-    .expect("apply_exclude_rule failed");
+    .expect("exclude_rule_classify failed");
 
   // Source row must be config_exclude_rule with label = matched suffix.
   let source_row = sqlx::query(
@@ -128,7 +130,7 @@ async fn test_exclude_rule_source_is_deduplicated() {
   let matched_suffix = ".internal.corp";
   let classification_type = "gaming";
 
-  apply_exclude_rule(
+  exclude_rule_classify(
     "a.internal.corp",
     classification_type,
     matched_suffix,
@@ -138,7 +140,7 @@ async fn test_exclude_rule_source_is_deduplicated() {
   .await
   .unwrap();
 
-  apply_exclude_rule(
+  exclude_rule_classify(
     "b.internal.corp",
     classification_type,
     matched_suffix,
