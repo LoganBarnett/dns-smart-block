@@ -14,6 +14,7 @@ fn test_classification_output_serialization() {
     classification: Classification {
       is_matching_site: true,
       confidence: 0.95,
+      reasoning: "This site is related to gaming".to_string(),
     },
     metadata: ClassificationMetadata {
       model: "llama2".to_string(),
@@ -90,7 +91,8 @@ fn test_classification_output_deserialization() {
         "result": "classified",
         "classification": {
             "is_matching_site": false,
-            "confidence": 0.12
+            "confidence": 0.12,
+            "reasoning": "This site is not a match"
         },
         "metadata": {
             "model": "llama3",
@@ -203,6 +205,7 @@ fn test_confidence_values() {
       classification: Classification {
         is_matching_site: true,
         confidence,
+        reasoning: "Test reasoning".to_string(),
       },
       metadata: ClassificationMetadata {
         model: "test".to_string(),
@@ -230,6 +233,7 @@ fn test_http_status_codes() {
       classification: Classification {
         is_matching_site: false,
         confidence: 0.5,
+        reasoning: "Test reasoning".to_string(),
       },
       metadata: ClassificationMetadata {
         model: "test".to_string(),

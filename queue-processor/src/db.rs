@@ -1,6 +1,8 @@
 use chrono::{Duration, Utc};
-use dns_smart_block_common::db_models::ClassificationInsert;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use dns_smart_block_common::db_models::{
+  ClassificationEventInsert, ClassificationInsert, DomainUpsert, PromptInsert,
+};
+use sqlx::{PgPool, Row};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -20,18 +22,14 @@ pub async fn insert_event(
   action_data: serde_json::Value,
   prompt_id: Option<i32>,
 ) -> Result<(), DbError> {
-  sqlx::query(
-        r#"
-        INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
-        VALUES ($1, $2::classification_action, $3, $4, NOW())
-        "#,
-    )
-    .bind(domain)
-    .bind(action)
-    .bind(action_data)
-    .bind(prompt_id)
-    .execute(pool)
-    .await?;
+  let event = ClassificationEventInsert {
+    domain: domain.to_string(),
+    action: action.to_string(),
+    action_data,
+    prompt_id,
+  };
+
+  event.insert(pool).await?;
 
   Ok(())
 }
@@ -103,86 +101,6 @@ pub async fn count_consecutive_errors(
   Ok(count)
 }
 
-/// Ensure a prompt exists and return its ID
-pub async fn ensure_prompt(
-  tx: &mut Transaction<'_, Postgres>,
-  content: &str,
-  hash: &str,
-) -> Result<i32, DbError> {
-  // Try to insert, ignore conflicts
-  sqlx::query(
-    r#"
-        INSERT INTO prompts (content, hash, created_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (hash) DO NOTHING
-        "#,
-  )
-  .bind(content)
-  .bind(hash)
-  .execute(&mut **tx)
-  .await?;
-
-  // Get the ID
-  let result = sqlx::query(
-    r#"
-        SELECT id FROM prompts WHERE hash = $1
-        "#,
-  )
-  .bind(hash)
-  .fetch_one(&mut **tx)
-  .await?;
-
-  let id: i32 = result.try_get("id")?;
-  Ok(id)
-}
-
-/// Upsert a domain in the domains table
-pub async fn upsert_domain(
-  tx: &mut Transaction<'_, Postgres>,
-  domain: &str,
-) -> Result<(), DbError> {
-  sqlx::query(
-    r#"
-        INSERT INTO domains (domain, last_updated)
-        VALUES ($1, NOW())
-        ON CONFLICT (domain) DO UPDATE SET last_updated = NOW()
-        "#,
-  )
-  .bind(domain)
-  .execute(&mut **tx)
-  .await?;
-
-  Ok(())
-}
-
-/// Insert a domain classification using a typed struct
-pub async fn insert_classification(
-  tx: &mut Transaction<'_, Postgres>,
-  classification: &ClassificationInsert,
-) -> Result<(), DbError> {
-  sqlx::query(
-    r#"
-        INSERT INTO domain_classifications (
-            domain, classification_type, is_matching_site, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-        "#,
-  )
-  .bind(&classification.domain)
-  .bind(&classification.classification_type)
-  .bind(classification.is_matching_site)
-  .bind(classification.confidence)
-  .bind(&classification.reasoning)
-  .bind(classification.valid_on)
-  .bind(classification.valid_until)
-  .bind(&classification.model)
-  .bind(classification.prompt_id)
-  .execute(&mut **tx)
-  .await?;
-
-  Ok(())
-}
-
 /// Update projections after a successful classification
 pub async fn update_projections(
   pool: &PgPool,
@@ -199,10 +117,17 @@ pub async fn update_projections(
   let mut tx = pool.begin().await?;
 
   // Ensure prompt exists
-  let prompt_id = ensure_prompt(&mut tx, prompt_content, prompt_hash).await?;
+  let prompt = PromptInsert {
+    content: prompt_content.to_string(),
+    hash: prompt_hash.to_string(),
+  };
+  let prompt_id = prompt.ensure(&mut tx).await?;
 
   // Upsert domain
-  upsert_domain(&mut tx, domain).await?;
+  let domain_upsert = DomainUpsert {
+    domain: domain.to_string(),
+  };
+  domain_upsert.upsert(&mut tx).await?;
 
   // Insert classification
   let valid_on = Utc::now();
@@ -220,7 +145,7 @@ pub async fn update_projections(
     prompt_id: Some(prompt_id),
   };
 
-  insert_classification(&mut tx, &classification).await?;
+  classification.insert(&mut tx).await?;
 
   tx.commit().await?;
 

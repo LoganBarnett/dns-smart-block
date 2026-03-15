@@ -79,13 +79,15 @@ async fn test_classify_gaming_site_with_mock_ollama() {
   let expected_result = Classification {
     is_matching_site: true,
     confidence: 0.95,
+    reasoning: "This is a gaming-related website".to_string(),
   };
 
   // Set up the mock response for the Ollama API
   let ollama_response = OllamaResponse {
     response: json!({
         "is_matching_site": true,
-        "confidence": 0.95
+        "confidence": 0.95,
+        "reasoning": "This is a gaming-related website"
     })
     .to_string(),
   };
@@ -146,7 +148,8 @@ async fn test_classify_non_gaming_site_with_mock_ollama() {
   let ollama_response = OllamaResponse {
     response: json!({
         "is_matching_site": false,
-        "confidence": 0.98
+        "confidence": 0.98,
+        "reasoning": "This is a news website, not gaming-related"
     })
     .to_string(),
   };

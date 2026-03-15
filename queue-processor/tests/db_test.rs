@@ -57,7 +57,7 @@ async fn test_insert_event_classifying() {
   });
 
   // Insert a "classifying" event
-  insert_event(&pool, domain, "classifying", action_data.clone())
+  insert_event(&pool, domain, "classifying", action_data.clone(), None)
     .await
     .expect("Failed to insert classifying event");
 
@@ -96,7 +96,7 @@ async fn test_insert_event_classified() {
   });
 
   // Insert a "classified" event
-  insert_event(&pool, domain, "classified", action_data.clone())
+  insert_event(&pool, domain, "classified", action_data.clone(), None)
     .await
     .expect("Failed to insert classified event");
 
@@ -133,7 +133,7 @@ async fn test_insert_event_error() {
   });
 
   // Insert an "error" event
-  insert_event(&pool, domain, "error", action_data.clone())
+  insert_event(&pool, domain, "error", action_data.clone(), None)
     .await
     .expect("Failed to insert error event");
 
@@ -175,7 +175,9 @@ async fn test_update_projections() {
     &pool,
     domain,
     classification_type,
+    true,
     confidence,
+    "test reasoning",
     model,
     prompt_content,
     prompt_hash,
@@ -268,7 +270,9 @@ async fn test_update_projections_deduplicates_prompts() {
     &pool,
     domain1,
     "gaming",
+    true,
     0.9,
+    "test reasoning 1",
     "llama2",
     prompt_content,
     prompt_hash,
@@ -282,7 +286,9 @@ async fn test_update_projections_deduplicates_prompts() {
     &pool,
     domain2,
     "gaming",
+    true,
     0.85,
+    "test reasoning 2",
     "llama2",
     prompt_content,
     prompt_hash,
@@ -354,7 +360,9 @@ async fn test_upsert_domain_updates_timestamp() {
     &pool,
     domain,
     "gaming",
+    true,
     0.9,
+    "test reasoning 1",
     "llama2",
     "test prompt",
     "sha256:test1",
@@ -381,7 +389,9 @@ async fn test_upsert_domain_updates_timestamp() {
     &pool,
     domain,
     "gaming",
+    true,
     0.85,
+    "test reasoning 2",
     "llama2",
     "test prompt 2",
     "sha256:test2",
@@ -452,7 +462,9 @@ async fn test_get_classifier_states_current() {
     &pool,
     domain,
     "gaming",
+    true,
     0.9,
+    "test reasoning",
     "llama2",
     "test prompt",
     "sha256:test",
@@ -548,6 +560,7 @@ async fn test_get_classifier_states_error() {
         "classification_type": "gaming",
         "error": "Test error"
     }),
+    None,
   )
   .await
   .expect("Failed to insert error event");
@@ -579,7 +592,9 @@ async fn test_get_classifier_states_mixed() {
     &pool,
     domain,
     "gaming",
+    true,
     0.9,
+    "gaming site reasoning",
     "llama2",
     "gaming prompt",
     "sha256:gaming",
@@ -597,6 +612,7 @@ async fn test_get_classifier_states_mixed() {
         "classification_type": "video-streaming",
         "error": "Timeout"
     }),
+    None,
   )
   .await
   .expect("Failed to insert video-streaming error");

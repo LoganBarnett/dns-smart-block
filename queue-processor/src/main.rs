@@ -9,6 +9,7 @@ use db::{ClassifierState, DbError};
 use dns_smart_block_classifier::{
   compute_prompt_hash, output::ClassificationOutput,
 };
+use dns_smart_block_common::db_models::PromptInsert;
 use dns_smart_block_common::logging::LoggingArgs;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -322,12 +323,11 @@ async fn process_domain(
         // Insert "classified" event with full context for reprojection.
         // Use a transaction to ensure prompt and store prompt_id reference.
         let mut tx = pool.begin().await?;
-        let prompt_id = db::ensure_prompt(
-          &mut tx,
-          &prompt_template,
-          &output.metadata.prompt_hash,
-        )
-        .await?;
+        let prompt = PromptInsert {
+          content: prompt_template.clone(),
+          hash: output.metadata.prompt_hash.clone(),
+        };
+        let prompt_id = prompt.ensure(&mut tx).await?;
 
         db::insert_event(
           pool,

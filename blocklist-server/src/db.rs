@@ -402,27 +402,9 @@ pub async fn rebuild_projections_from_events(
       prompt_id,
     };
 
-    sqlx::query(
-      r#"
-            INSERT INTO domain_classifications (
-                domain, classification_type, is_matching_site, confidence,
-                reasoning, valid_on, valid_until, model, prompt_id, created_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            "#,
-    )
-    .bind(&classification.domain)
-    .bind(&classification.classification_type)
-    .bind(classification.is_matching_site)
-    .bind(classification.confidence)
-    .bind(&classification.reasoning)
-    .bind(classification.valid_on)
-    .bind(classification.valid_until)
-    .bind(&classification.model)
-    .bind(classification.prompt_id)
-    .bind(event_created_at)
-    .execute(&mut *tx)
-    .await?;
+    classification
+      .insert_with_created_at(&mut tx, event_created_at)
+      .await?;
 
     count += 1;
   }
