@@ -1,0 +1,18 @@
+[package]
+name = "dns-smart-block-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "dns-smart-block-cli"
+path = "src/main.rs"
+
+[dependencies]
+dns-smart-block-common = { path = "../common" }
+clap = { version = "*", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+tokio = { workspace = true }
+thiserror = "*"
+tracing = "*"
