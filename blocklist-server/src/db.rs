@@ -154,6 +154,92 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
     })
 }
 
+/// Classification details for diagnostics endpoint.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClassificationDetail {
+    pub domain: String,
+    pub classification_type: String,
+    pub confidence: f32,
+    pub reasoning: Option<String>,
+    pub model: String,
+    pub valid_on: DateTime<Utc>,
+    pub valid_until: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Get all current valid classifications with details (for diagnostics).
+/// Can optionally filter by classification_type.
+pub async fn get_classifications(
+    pool: &PgPool,
+    classification_type: Option<&str>,
+) -> Result<Vec<ClassificationDetail>, DbError> {
+    let now = Utc::now();
+
+    let rows = if let Some(ct) = classification_type {
+        sqlx::query(
+            r#"
+            SELECT
+                dc.domain,
+                dc.classification_type,
+                dc.confidence,
+                dc.reasoning,
+                dc.model,
+                dc.valid_on,
+                dc.valid_until,
+                dc.created_at
+            FROM domain_classifications dc
+            WHERE dc.classification_type = $1
+              AND dc.valid_on <= $2
+              AND dc.valid_until > $2
+            ORDER BY dc.created_at DESC
+            "#,
+        )
+        .bind(ct)
+        .bind(now)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT
+                dc.domain,
+                dc.classification_type,
+                dc.confidence,
+                dc.reasoning,
+                dc.model,
+                dc.valid_on,
+                dc.valid_until,
+                dc.created_at
+            FROM domain_classifications dc
+            WHERE dc.valid_on <= $1
+              AND dc.valid_until > $1
+            ORDER BY dc.created_at DESC
+            "#,
+        )
+        .bind(now)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let classifications = rows
+        .into_iter()
+        .map(|row| -> Result<ClassificationDetail, DbError> {
+            Ok(ClassificationDetail {
+                domain: row.try_get("domain")?,
+                classification_type: row.try_get("classification_type")?,
+                confidence: row.try_get("confidence")?,
+                reasoning: row.try_get("reasoning")?,
+                model: row.try_get("model")?,
+                valid_on: row.try_get("valid_on")?,
+                valid_until: row.try_get("valid_until")?,
+                created_at: row.try_get("created_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(classifications)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

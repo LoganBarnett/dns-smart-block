@@ -238,6 +238,43 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+#[derive(Deserialize)]
+struct ClassificationsParams {
+    classification_type: Option<String>,
+}
+
+async fn get_classifications(
+    State(state): State<AppState>,
+    Query(params): Query<ClassificationsParams>,
+) -> impl IntoResponse {
+    match db::get_classifications(
+        &state.pool,
+        params.classification_type.as_deref(),
+    )
+    .await
+    {
+        Ok(classifications) => {
+            info!(
+                "Serving {} classifications{}",
+                classifications.len(),
+                params
+                    .classification_type
+                    .as_ref()
+                    .map(|ct| format!(" for type '{}'", ct))
+                    .unwrap_or_default()
+            );
+            (StatusCode::OK, axum::Json(classifications))
+        }
+        Err(e) => {
+            error!("Database error fetching classifications: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(Vec::<db::ClassificationDetail>::new()),
+            )
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = CliArgs::parse();
@@ -288,6 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build router.
     let app = Router::new()
         .route("/blocklist", get(get_blocklist))
+        .route("/classifications", get(get_classifications))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
         .layer(TraceLayer::new_for_http())
