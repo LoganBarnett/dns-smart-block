@@ -11,13 +11,14 @@
       };
 
       preset = mkOption {
-        type = types.nullOr (types.enum [ "gaming" "video-streaming" ]);
+        type = types.nullOr (types.enum [ "gaming" "video-streaming" "social-media" ]);
         default = null;
         example = "gaming";
         description = ''
           Use a bundled classifier preset. Available presets:
           - "gaming" - Classifies gaming-related websites
           - "video-streaming" - Classifies video streaming platforms
+          - "social-media" - Classifies social media, chat, and messaging platforms
 
           If set, the bundled prompt template will be used.
           If null, you must provide a customTemplate.
@@ -316,6 +317,8 @@ in {
               "${packages.classifier}/share/dns-smart-block/prompts/gaming-classifier.txt"
             else if classifier.preset == "video-streaming" then
               "${packages.classifier}/share/dns-smart-block/prompts/video-streaming-classifier.txt"
+            else if classifier.preset == "social-media" then
+              "${packages.classifier}/share/dns-smart-block/prompts/social-media-classifier.txt"
             else
               classifier.customTemplate;
         in ''
@@ -358,6 +361,8 @@ in {
           "${packages.classifier}/share/dns-smart-block/prompts/gaming-classifier.txt"
         else if classifier.preset == "video-streaming" then
           "${packages.classifier}/share/dns-smart-block/prompts/video-streaming-classifier.txt"
+        else if classifier.preset == "social-media" then
+          "${packages.classifier}/share/dns-smart-block/prompts/social-media-classifier.txt"
         else
           classifier.customTemplate
       ) enabledClassifiers

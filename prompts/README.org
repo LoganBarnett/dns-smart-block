@@ -55,6 +55,33 @@ services.dns-smart-block = {
 };
 #+end_src
 
+** social-media-classifier.txt
+
+Classifies social media, chat, and social messaging platforms including:
+
+- Social networks (e.g., Facebook, Instagram, Twitter/X, Snapchat, LinkedIn).
+- Microblogging platforms (e.g., Tumblr, Mastodon, Bluesky, Threads).
+- Messaging and chat apps (e.g., WhatsApp, Telegram, Signal, Discord).
+- Community discussion platforms (e.g., Reddit, Lemmy, Hacker News).
+- Dating and social discovery apps (e.g., Tinder, Bumble, Hinge).
+
+*Classification Criteria:*
+
+- ~is_matching_site: true~ - Site's PRIMARY purpose is social interaction,
+  messaging, or community participation.
+- ~is_matching_site: false~ - Video streaming platforms where social features
+  are secondary (e.g., YouTube, TikTok), professional productivity tools
+  (e.g., Zoom, Teams), email services (e.g., Gmail), or gaming platforms.
+
+*Usage in NixOS:*
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  enable = true;
+  classifiers.social-media.enable = true;
+};
+#+end_src
+
 *Usage with CLI:*
 
 The prompt is installed to:

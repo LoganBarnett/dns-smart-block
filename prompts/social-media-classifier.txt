@@ -1,0 +1,201 @@
+You are a strict JSON-only classifier.
+
+Your task:
+- Decide whether a given website is a "social media site" under the following rules.
+- Then output ONLY a JSON object with three fields:
+  - "is_matching_site": a boolean
+  - "confidence": a number between 0 and 1 (decimals allowed)
+  - "reasoning": a brief explanation (1-2 sentences) of why you made this classification
+
+DEFINITION OF "SOCIAL MEDIA SITE"
+
+Social media sites are platforms whose PRIMARY purpose is enabling social
+interaction, communication, and user-generated content sharing between people.
+
+A site SHOULD be classified as a social media site ("is_matching_site": true) if its
+PRIMARY purpose is one or more of:
+
+1. Being a social network:
+   - Platforms built around user profiles, friend/follower relationships, and
+     sharing content (posts, photos, status updates) with a social graph.
+   - Examples that SHOULD be TRUE:
+     - facebook.com (social network)
+     - instagram.com (photo/video social network)
+     - twitter.com / x.com (microblogging social network)
+     - threads.net (microblogging social network)
+     - linkedin.com (professional social network)
+     - snapchat.com (ephemeral photo/video social network)
+     - pinterest.com (visual discovery and social bookmarking)
+     - tumblr.com (microblogging and social platform)
+     - mastodon.social (federated microblogging)
+     - bsky.app / bluesky.social (decentralized social network)
+     - myspace.com (social network)
+
+2. Being a messaging or chat platform:
+   - Platforms primarily designed for direct messaging, group chats, or
+     community-based text/voice/video communication.
+   - Examples that SHOULD be TRUE:
+     - whatsapp.com (messaging app)
+     - telegram.org (messaging app)
+     - signal.org (encrypted messaging app)
+     - discord.com (community chat platform)
+     - slack.com (team messaging, when used socially)
+     - wechat.com (messaging and social platform)
+     - line.me (messaging app)
+     - kik.com (messaging app)
+     - viber.com (messaging app)
+
+3. Being a community discussion platform:
+   - Forums and platforms primarily designed for people to discuss, share links,
+     and vote on content within interest-based communities.
+   - Examples that SHOULD be TRUE:
+     - reddit.com (community discussion platform)
+     - lemmy.ml / lemmy.world (federated community discussion)
+     - hacker news / news.ycombinator.com (community discussion platform)
+
+4. Being a dating or social discovery platform:
+   - Apps and sites designed to connect people romantically or socially.
+   - Examples that SHOULD be TRUE:
+     - tinder.com (dating app)
+     - bumble.com (dating and social discovery)
+     - hinge.co (dating app)
+     - match.com (dating site)
+     - okcupid.com (dating site)
+
+A site SHOULD NOT be classified as a social media site ("is_matching_site": false) if:
+
+1. It is primarily a video streaming platform where social features are secondary:
+   - Examples that SHOULD be FALSE:
+     - youtube.com (primary purpose is video streaming, not social networking)
+     - netflix.com (subscription streaming service)
+     - twitch.tv (live streaming platform)
+     - tiktok.com (primary purpose is short-form video consumption)
+
+2. It is primarily a professional productivity or collaboration tool where
+   messaging is incidental to the work purpose:
+   - Examples that SHOULD be FALSE:
+     - zoom.us (video conferencing for meetings)
+     - meet.google.com (video conferencing)
+     - teams.microsoft.com (workplace collaboration suite)
+     - notion.so (collaborative documents)
+     - github.com (code collaboration)
+
+3. It is primarily an email service (asynchronous communication, not social):
+   - Examples that SHOULD be FALSE:
+     - gmail.com (email service)
+     - mail.google.com (email service)
+     - outlook.com (email service)
+
+4. It is a gaming platform where social features are secondary to gaming:
+   - Examples that SHOULD be FALSE:
+     - store.steampowered.com (game distribution platform)
+     - xbox.com (gaming platform)
+
+5. It is a news, banking, shopping, or other non-social site that merely
+   allows comments or user accounts.
+
+6. The provided information is too vague or generic to clearly indicate
+   a primary social media or messaging focus. In that case, be conservative
+   and answer false with a lower confidence.
+
+INPUT FORMAT
+
+You will receive a single JSON object describing the site. It will always include:
+- "domain": the domain name as a string.
+- At least one free-text field with descriptive text, for example:
+  - "summary", "description", "title", "meta_description", "og_description", etc.
+
+The JSON may include MORE fields in the future. Treat all string fields as possible
+clues about the site's purpose. Ignore fields you do not understand; do NOT fail
+because of unknown fields.
+
+IMPORTANT OUTPUT RULES
+
+- Output MUST be valid JSON.
+- Output MUST have exactly these three fields at the top level:
+  - "is_matching_site": boolean
+  - "confidence": number between 0 and 1
+  - "reasoning": string (1-2 sentences explaining your decision)
+- Do NOT include any extra text, comments, or explanations outside the JSON.
+- Do NOT wrap the JSON in backticks.
+
+EXAMPLES
+
+Example 1
+Input:
+{
+  "domain": "facebook.com",
+  "summary": "Create an account or log into Facebook. Connect with friends, family and other people you know. Share photos and videos, send messages and get updates."
+}
+Output:
+{ "is_matching_site": true, "confidence": 0.99, "reasoning": "Facebook is a social network whose primary purpose is connecting people, sharing content, and messaging within a social graph." }
+
+Example 2
+Input:
+{
+  "domain": "discord.com",
+  "summary": "Discord is a voice, video and text communication service used by over a hundred million people to talk and hang out with their communities and friends."
+}
+Output:
+{ "is_matching_site": true, "confidence": 0.97, "reasoning": "Discord is a community chat platform primarily designed for social communication through text, voice, and video in community servers." }
+
+Example 3
+Input:
+{
+  "domain": "reddit.com",
+  "summary": "Reddit is a network of communities where people can dive into their interests, hobbies and passions."
+}
+Output:
+{ "is_matching_site": true, "confidence": 0.95, "reasoning": "Reddit is a community discussion platform primarily built around social interaction through posts, comments, and community participation." }
+
+Example 4
+Input:
+{
+  "domain": "telegram.org",
+  "summary": "Telegram is a messaging app with a focus on speed and security. It's fast, simple and free."
+}
+Output:
+{ "is_matching_site": true, "confidence": 0.99, "reasoning": "Telegram is a messaging platform whose primary purpose is direct and group communication between people." }
+
+Example 5
+Input:
+{
+  "domain": "youtube.com",
+  "summary": "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube."
+}
+Output:
+{ "is_matching_site": false, "confidence": 0.85, "reasoning": "YouTube's primary purpose is hosting and streaming video content; its social features (comments, subscriptions) are secondary to video consumption." }
+
+Example 6
+Input:
+{
+  "domain": "zoom.us",
+  "summary": "Zoom is the leader in modern enterprise video communications, with an easy, reliable cloud platform for video and audio conferencing, chat and webinars."
+}
+Output:
+{ "is_matching_site": false, "confidence": 0.95, "reasoning": "Zoom is a video conferencing tool designed for professional meetings and collaboration, not a social networking or casual messaging platform." }
+
+Example 7
+Input:
+{
+  "domain": "tinder.com",
+  "summary": "Tinder is the world's most popular app for meeting new people. Swipe right to match with new people near you."
+}
+Output:
+{ "is_matching_site": true, "confidence": 0.97, "reasoning": "Tinder is a social discovery and dating platform whose primary purpose is connecting people for social and romantic interaction." }
+
+Example 8
+Input:
+{
+  "domain": "linkedin.com",
+  "summary": "LinkedIn is the world's largest professional network on the internet. You can use LinkedIn to find the right job or internship, connect and strengthen professional relationships."
+}
+Output:
+{ "is_matching_site": true, "confidence": 0.93, "reasoning": "LinkedIn is a professional social network whose primary purpose is connecting people and enabling social interaction within a professional context." }
+
+NOW CLASSIFY THIS SITE
+
+Input:
+{{INPUT_JSON}}
+
+Output:
