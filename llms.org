@@ -17,6 +17,12 @@ vibe coding.  If a piece of documentation seems both worthy of both human and
 LLM audiences, promote said documentation to either the README or some
 derivative document.
 
+** Documentation Style
+
+- Use full punctuation for all sentences, including list items.
+- Use two spaces between the end of a sentence and the start of the next.
+- Wrap prose to 80 columns.
+
 ~dnsdist~ → Blocky → Rust worker → Ollama → Git
 
 ** Goal

@@ -9,17 +9,17 @@ with DNS Smart Block.
 
 Classifies gaming-related websites including:
 
-- Video game news, reviews, and guides (e.g., IGN, GameSpot)
-- Game distribution platforms (e.g., Steam, Epic Games Store)
-- Browser game portals (e.g., Newgrounds, Scratch)
-- Game development platforms
-- Esports and gaming communities
+- Video game news, reviews, and guides (e.g., IGN, GameSpot).
+- Game distribution platforms (e.g., Steam, Epic Games Store).
+- Browser game portals (e.g., Newgrounds, Scratch).
+- Game development platforms.
+- Esports and gaming communities.
 
 *Classification Criteria:*
 
-- ~is_matching_site: true~ - Site's PRIMARY purpose is gaming-related
+- ~is_matching_site: true~ - Site's PRIMARY purpose is gaming-related.
 - ~is_matching_site: false~ - General platforms with gaming content
-  (e.g., YouTube, Reddit, Discord)
+  (e.g., YouTube, Reddit, Discord).
 
 *Usage in NixOS:*
 
@@ -34,17 +34,17 @@ services.dns-smart-block = {
 
 Classifies video streaming platforms including:
 
-- Video streaming services (e.g., YouTube, Netflix, Hulu)
-- Live streaming platforms (e.g., Twitch, Kick)
-- Short-form video platforms (e.g., TikTok)
-- Video hosting and sharing (e.g., Vimeo, Dailymotion)
+- Video streaming services (e.g., YouTube, Netflix, Hulu).
+- Live streaming platforms (e.g., Twitch, Kick).
+- Short-form video platforms (e.g., TikTok).
+- Video hosting and sharing (e.g., Vimeo, Dailymotion).
 
 *Classification Criteria:*
 
-- ~is_matching_site: true~ - Site's PRIMARY purpose is video streaming
+- ~is_matching_site: true~ - Site's PRIMARY purpose is video streaming.
 - ~is_matching_site: false~ - General social networks with video support
   (e.g., Facebook, Instagram), video conferencing (e.g., Zoom), or chat
-  platforms (e.g., Discord)
+  platforms (e.g., Discord).
 
 *Usage in NixOS:*
 
@@ -143,9 +143,9 @@ metadata.
 
 To add a new bundled classifier:
 
-1. Create ~prompts/your-classifier.txt~ following the template above
+1. Create ~prompts/your-classifier.txt~ following the template above.
 2. Update ~nix/default.nix~ if needed (prompts are auto-copied via
-   ~postInstall~)
+   ~postInstall~).
 3. Add the classifier configuration to ~nix/nixos-module.nix~ in the
-   ~classifiers~ attrset
-4. Update this README with documentation
+   ~classifiers~ attrset.
+4. Update this README with documentation.
