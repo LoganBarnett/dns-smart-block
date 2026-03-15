@@ -198,6 +198,18 @@ in {
         default = "llama2";
         description = "Ollama model to use for classification";
       };
+
+      numCtx = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = 4096;
+        description = ''
+          Context window size passed to Ollama.  Controls the KV cache
+          allocation at model load time.  The default of 4096 provides ample
+          headroom for classification prompts while avoiding the much larger
+          model-native default that wastes GPU memory.  Set to null to omit
+          the option and let Ollama use its own default.
+        '';
+      };
     };
 
     # Blocklist Server Configuration
@@ -342,6 +354,7 @@ in {
       [ollama]
       url = "${cfg.ollama.url}"
       model = "${cfg.ollama.model}"
+      ${lib.optionalString (cfg.ollama.numCtx != null) "num_ctx = ${toString cfg.ollama.numCtx}"}
 
       [http]
       timeout_sec = ${toString cfg.queueProcessor.httpTimeoutSec}
