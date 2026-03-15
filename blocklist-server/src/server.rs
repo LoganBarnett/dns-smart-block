@@ -11,7 +11,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use dns_smart_block_blocklist_server::{
-  CLASSIFICATIONS_CSS, CLASSIFICATIONS_HTML, CLASSIFICATIONS_JS,
+  CLASSIFICATIONS_CSS, CLASSIFICATIONS_HTML, ELM_JS,
 };
 use dns_smart_block_common::db::{
   DomainExpire, DomainRequeue, ErroredClassification,
@@ -181,33 +181,6 @@ async fn get_classifications(
   Query(params): Query<ClassificationsParams>,
   headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-  let classifications = match db::get_classifications(
-    &state.pool,
-    params.classification_type.as_deref(),
-  )
-  .await
-  {
-    Ok(c) => c,
-    Err(e) => {
-      error!("Database error fetching classifications: {}", e);
-      return (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        axum::Json(Vec::<db::ClassificationDetail>::new()),
-      )
-        .into_response();
-    }
-  };
-
-  info!(
-    "Serving {} classifications{}",
-    classifications.len(),
-    params
-      .classification_type
-      .as_ref()
-      .map(|ct| format!(" for type '{}'", ct))
-      .unwrap_or_default()
-  );
-
   let wants_html = headers
     .get(axum::http::header::ACCEPT)
     .and_then(|v| v.to_str().ok())
@@ -215,163 +188,66 @@ async fn get_classifications(
     .unwrap_or(false);
 
   if wants_html {
-    let errored = ErroredClassification::find(
-      &state.pool,
-      params.classification_type.as_deref(),
-    )
-    .await
-    .unwrap_or_else(|e| {
-      error!("Database error fetching errored classifications: {}", e);
-      vec![]
-    });
-
-    let html = render_classifications_html(&classifications, &errored, &params);
-    (
+    return (
       StatusCode::OK,
       [(axum::http::header::CONTENT_TYPE, "text/html")],
-      html,
+      CLASSIFICATIONS_HTML,
     )
-      .into_response()
-  } else {
-    (StatusCode::OK, axum::Json(classifications)).into_response()
+      .into_response();
+  }
+
+  match db::get_classifications(
+    &state.pool,
+    params.classification_type.as_deref(),
+  )
+  .await
+  {
+    Ok(classifications) => {
+      info!(
+        "Serving {} classifications{}",
+        classifications.len(),
+        params
+          .classification_type
+          .as_ref()
+          .map(|ct| format!(" for type '{}'", ct))
+          .unwrap_or_default()
+      );
+      (StatusCode::OK, axum::Json(classifications)).into_response()
+    }
+    Err(e) => {
+      error!("Database error fetching classifications: {}", e);
+      (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(Vec::<db::ClassificationDetail>::new()),
+      )
+        .into_response()
+    }
   }
 }
 
-fn render_classifications_html(
-  classifications: &[db::ClassificationDetail],
-  errored: &[ErroredClassification],
-  params: &ClassificationsParams,
-) -> String {
-  let filter_info = params
-    .classification_type
-    .as_ref()
-    .map(|ct| format!(" (filtered by type: {})", ct))
-    .unwrap_or_default();
-
-  let rows: String = classifications
-    .iter()
-    .map(|c| {
-      format!(
-        r#"<tr>
-          <td>{}</td>
-          <td>{}</td>
-          <td>{}</td>
-          <td>{:.2}</td>
-          <td class="reasoning">{}</td>
-          <td>{}</td>
-          <td>{}</td>
-          <td>{}</td>
-          <td>{}</td>
-          <td><button class="expire-btn" onclick="expireDomain('{}')">Expire</button></td>
-        </tr>"#,
-        html_escape(&c.domain),
-        html_escape(&c.classification_type),
-        if c.is_matching_site { "Yes" } else { "No" },
-        c.confidence,
-        html_escape(c.reasoning.as_deref().unwrap_or("")),
-        html_escape(&c.model),
-        c.valid_on.format("%Y-%m-%d %H:%M:%S"),
-        c.valid_until.format("%Y-%m-%d %H:%M:%S"),
-        c.created_at.format("%Y-%m-%d %H:%M:%S"),
-        html_escape(&c.domain),
+async fn get_errors(
+  State(state): State<AppState>,
+  Query(params): Query<ClassificationsParams>,
+) -> impl IntoResponse {
+  match ErroredClassification::find(
+    &state.pool,
+    params.classification_type.as_deref(),
+  )
+  .await
+  {
+    Ok(errors) => {
+      info!("Serving {} errored classifications", errors.len());
+      (StatusCode::OK, axum::Json(errors)).into_response()
+    }
+    Err(e) => {
+      error!("Database error fetching errored classifications: {}", e);
+      (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(Vec::<ErroredClassification>::new()),
       )
-    })
-    .collect();
-
-  let requeue_type_buttons: String = {
-    let mut seen = HashSet::new();
-    errored
-      .iter()
-      .filter(|e| seen.insert(e.classification_type.clone()))
-      .map(|e| {
-        let type_count = errored
-          .iter()
-          .filter(|x| x.classification_type == e.classification_type)
-          .count();
-        format!(
-          r#"<button class="requeue-btn" onclick="requeueType('{}')">Requeue {} errors ({})</button>"#,
-          html_escape(&e.classification_type),
-          html_escape(&e.classification_type),
-          type_count,
-        )
-      })
-      .collect::<Vec<_>>()
-      .join("\n")
-  };
-
-  let admin_actions = if errored.is_empty() {
-    String::new()
-  } else {
-    format!(
-      r#"<div class="admin-actions">
-  <button class="requeue-btn requeue-all-btn" onclick="requeueAll()">Requeue all errors ({})</button>
-  {}
-</div>"#,
-      errored.len(),
-      requeue_type_buttons,
-    )
-  };
-
-  let errors_section = if errored.is_empty() {
-    String::new()
-  } else {
-    let error_rows: String = errored
-      .iter()
-      .map(|e| {
-        format!(
-          r#"<tr class="error-row">
-          <td>{}</td>
-          <td>{}</td>
-          <td class="reasoning">{}</td>
-          <td>{}</td>
-          <td><button class="requeue-btn" onclick="requeueDomain('{}', '{}')">Requeue</button></td>
-        </tr>"#,
-          html_escape(&e.domain),
-          html_escape(&e.classification_type),
-          html_escape(e.error_message.as_deref().unwrap_or("")),
-          e.errored_at.format("%Y-%m-%d %H:%M:%S"),
-          html_escape(&e.domain),
-          html_escape(&e.classification_type),
-        )
-      })
-      .collect();
-
-    format!(
-      r#"<h2>Errored Classifications</h2>
-<div class="count">Total: {} error(s)</div>
-<table id="errorsTable">
-  <thead>
-    <tr>
-      <th onclick="sortTable('errorsTable', 0)">Domain</th>
-      <th onclick="sortTable('errorsTable', 1)">Type</th>
-      <th onclick="sortTable('errorsTable', 2)">Error</th>
-      <th onclick="sortTable('errorsTable', 3)">Errored At</th>
-      <th>Actions</th>
-    </tr>
-  </thead>
-  <tbody>
-    {}
-  </tbody>
-</table>"#,
-      errored.len(),
-      error_rows,
-    )
-  };
-
-  CLASSIFICATIONS_HTML
-    .replace("{{FILTER_INFO}}", &filter_info)
-    .replace("{{COUNT}}", &classifications.len().to_string())
-    .replace("{{ROWS}}", &rows)
-    .replace("{{ADMIN_ACTIONS}}", &admin_actions)
-    .replace("{{ERRORS_SECTION}}", &errors_section)
-}
-
-fn html_escape(s: &str) -> String {
-  s.replace('&', "&amp;")
-    .replace('<', "&lt;")
-    .replace('>', "&gt;")
-    .replace('"', "&quot;")
-    .replace('\'', "&#x27;")
+        .into_response()
+    }
+  }
 }
 
 fn default_ttl_days() -> i64 {
@@ -873,11 +749,8 @@ async fn static_css() -> impl IntoResponse {
   ([(header::CONTENT_TYPE, "text/css")], CLASSIFICATIONS_CSS)
 }
 
-async fn static_js() -> impl IntoResponse {
-  (
-    [(header::CONTENT_TYPE, "application/javascript")],
-    CLASSIFICATIONS_JS,
-  )
+async fn static_elm_js() -> impl IntoResponse {
+  ([(header::CONTENT_TYPE, "application/javascript")], ELM_JS)
 }
 
 // ── router builders ───────────────────────────────────────────────────────────
@@ -894,6 +767,7 @@ fn public_router(state: AppState) -> Router {
 fn admin_router(state: AppState) -> Router {
   Router::new()
     .route("/classifications", get(get_classifications))
+    .route("/errors", get(get_errors))
     .route("/classify", post(classify))
     .route("/reconcile", post(reconcile))
     .route("/reprojection", post(reprojection))
@@ -902,7 +776,7 @@ fn admin_router(state: AppState) -> Router {
     .route("/requeue/type", post(requeue_type))
     .route("/requeue/all", post(requeue_all))
     .route("/static/classifications.css", get(static_css))
-    .route("/static/classifications.js", get(static_js))
+    .route("/static/elm.js", get(static_elm_js))
     .layer(TraceLayer::new_for_http())
     .with_state(state)
 }
@@ -995,6 +869,10 @@ pub async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
   });
 
   let public_listener = tokio::net::TcpListener::bind(public_addr).await?;
+
+  dns_smart_block_common::systemd::notify_ready();
+  dns_smart_block_common::systemd::spawn_watchdog();
+
   axum::serve(public_listener, public_router(state)).await?;
 
   Ok(())

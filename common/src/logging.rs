@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::env;
+use tracing_subscriber::prelude::*;
 
 #[derive(Parser, Debug, Clone)]
 pub struct LoggingArgs {
@@ -13,24 +14,38 @@ pub struct LoggingArgs {
 }
 
 impl LoggingArgs {
-  /// Initialize tracing subscriber with appropriate settings for the environment
+  /// Initialize tracing subscriber with appropriate settings for the environment.
+  /// When the journald socket is available, logs are sent there as structured
+  /// fields.  Otherwise falls back to a plain stderr formatter.
   pub fn init_tracing(&self) {
     let should_use_ansi = self.should_use_ansi();
     let should_use_timestamp = self.should_use_timestamp();
 
-    let fmt = tracing_subscriber::fmt()
-      .with_writer(std::io::stderr)
-      .with_ansi(should_use_ansi)
-      .with_env_filter(
-        tracing_subscriber::EnvFilter::from_default_env()
-          .add_directive(tracing::Level::INFO.into()),
-      );
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+      .add_directive(tracing::Level::INFO.into());
 
-    if should_use_timestamp {
-      fmt.init();
+    // Try to connect to the journald socket; fall back to stderr fmt if unavailable.
+    let journald = tracing_journald::layer().ok();
+
+    // Only emit fmt logs when journald is not active.
+    let fmt_layer = if journald.is_none() {
+      let layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(should_use_ansi);
+      if should_use_timestamp {
+        Some(layer.boxed())
+      } else {
+        Some(layer.without_time().boxed())
+      }
     } else {
-      fmt.without_time().init();
-    }
+      None
+    };
+
+    tracing_subscriber::registry()
+      .with(env_filter)
+      .with(journald)
+      .with(fmt_layer)
+      .init();
   }
 
   /// Determine if ANSI colors should be used

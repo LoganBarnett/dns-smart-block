@@ -51,6 +51,9 @@ async fn main() -> Result<()> {
 
   let mut stream = log_source.into_stream().await?;
 
+  dns_smart_block_common::systemd::notify_ready();
+  dns_smart_block_common::systemd::spawn_watchdog();
+
   while let Some(line_result) = stream.next().await {
     match line_result {
       Ok(line) => {

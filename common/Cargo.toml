@@ -7,7 +7,9 @@ edition = "2021"
 clap = { version = "*", features = ["derive", "env"] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
+tracing-journald = { workspace = true }
 atty = "*"
+sd-notify = { workspace = true }
 sqlx = { workspace = true }
 chrono = { version = "*", features = ["serde"] }
 serde = { version = "*", features = ["derive"] }

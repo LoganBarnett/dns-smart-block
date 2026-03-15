@@ -560,7 +560,8 @@ in {
         requires = lib.optional cfg.database.enable "postgresql.service";
 
         serviceConfig = {
-          Type = "simple";
+          Type = "notify";
+          WatchdogSec = lib.mkDefault "30s";
           User = serviceUser;
           Group = serviceGroup;
 
@@ -610,7 +611,8 @@ in {
         wants = lib.optional cfg.nats.enable "dns-smart-block-nats-init.service";
 
         serviceConfig = {
-          Type = "simple";
+          Type = "notify";
+          WatchdogSec = lib.mkDefault "30s";
           User = serviceUser;
           Group = serviceGroup;
 
@@ -751,7 +753,8 @@ in {
         requires = lib.optional cfg.database.enable "postgresql.service";
 
         serviceConfig = {
-          Type = "simple";
+          Type = "notify";
+          WatchdogSec = lib.mkDefault "30s";
           User = serviceUser;
           Group = serviceGroup;
 

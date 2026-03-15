@@ -12,6 +12,7 @@ use dns_smart_block_classifier::{
 };
 use dns_smart_block_common::db::{
   ClassificationSource, ClassifierState, PromptInsert, classification_store,
+  fetch_all_override,
 };
 use dns_smart_block_common::logging::LoggingArgs;
 use futures::StreamExt;
@@ -279,6 +280,18 @@ async fn process_domain(
     return Ok(());
   }
 
+  // Check for an active "all" override.  When present, the stored
+  // is_matching_site value applies to every classifier that lacks its own
+  // current record, and the LLM is never invoked for this domain.
+  let all_override = fetch_all_override(pool, domain).await?;
+  if all_override.is_some() {
+    info!(
+      "Domain {} has an active 'all' override — LLM skipped for any \
+       classifier without a current per-type record",
+      domain
+    );
+  }
+
   // Process each classifier based on its state.
   for (classification_type, state) in states {
     let classifier_config = config
@@ -291,6 +304,15 @@ async fn process_domain(
       ClassifierState::Current => {
         info!(
           "Skipping classifier '{}' for domain {}: classification is current",
+          classification_type, domain
+        );
+        continue;
+      }
+      // "all" override is active and there is no current per-type record.
+      // The blocklist query will fall back to the "all" result; skip the LLM.
+      _ if all_override.is_some() => {
+        info!(
+          "Skipping classifier '{}' for domain {}: 'all' override is active",
           classification_type, domain
         );
         continue;
@@ -565,6 +587,9 @@ async fn main() -> Result<()> {
   let mut messages = consumer.messages().await.map_err(|e| {
     ProcessorError::NatsError(format!("Failed to get message stream: {}", e))
   })?;
+
+  dns_smart_block_common::systemd::notify_ready();
+  dns_smart_block_common::systemd::spawn_watchdog();
 
   while let Some(message) = messages.next().await {
     let message = match message {

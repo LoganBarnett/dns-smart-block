@@ -4,7 +4,9 @@ resolver = "2"
 
 [workspace.dependencies]
 base64ct = "1.6"
+sd-notify = "0.4"
 serial_test = "3"
+tracing-journald = "*"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "migrate"] }
 strum = { version = "0.26", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
