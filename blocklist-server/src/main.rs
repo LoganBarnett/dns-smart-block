@@ -407,11 +407,12 @@ fn render_classifications_html(
     .collect();
 
   // Read the HTML template from file
-  let template = std::fs::read_to_string("templates/classifications.html")
-    .unwrap_or_else(|e| {
-      error!("Failed to read template file: {}", e);
-      String::from("<html><body>Error loading template</body></html>")
-    });
+  let template =
+    std::fs::read_to_string("blocklist-server/templates/classifications.html")
+      .unwrap_or_else(|e| {
+        error!("Failed to read template file: {}", e);
+        String::from("<html><body>Error loading template</body></html>")
+      });
 
   // Perform substitutions
   template
@@ -516,6 +517,16 @@ async fn expire(
   }
 }
 
+fn create_admin_router(state: AppState) -> Router {
+  Router::new()
+    .route("/classifications", get(get_classifications))
+    .route("/reprojection", post(reprojection))
+    .route("/expire", post(expire))
+    .nest_service("/static", ServeDir::new("blocklist-server/static"))
+    .layer(TraceLayer::new_for_http())
+    .with_state(state)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args = CliArgs::parse();
@@ -573,13 +584,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_state(state.clone());
 
   // Build admin router (localhost only)
-  let admin_app = Router::new()
-    .route("/classifications", get(get_classifications))
-    .route("/reprojection", post(reprojection))
-    .route("/expire", post(expire))
-    .nest_service("/static", ServeDir::new("static"))
-    .layer(TraceLayer::new_for_http())
-    .with_state(state);
+  let admin_app = create_admin_router(state);
 
   // Parse bind addresses
   let public_addr: SocketAddr = args
