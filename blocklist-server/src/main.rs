@@ -299,6 +299,7 @@ struct ClassificationsParams {
 async fn get_classifications(
   State(state): State<AppState>,
   Query(params): Query<ClassificationsParams>,
+  headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
   match db::get_classifications(
     &state.pool,
@@ -316,7 +317,25 @@ async fn get_classifications(
           .map(|ct| format!(" for type '{}'", ct))
           .unwrap_or_default()
       );
-      (StatusCode::OK, axum::Json(classifications))
+
+      // Check if client wants HTML.
+      let wants_html = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false);
+
+      if wants_html {
+        let html = render_classifications_html(&classifications, &params);
+        (
+          StatusCode::OK,
+          [(axum::http::header::CONTENT_TYPE, "text/html")],
+          html,
+        )
+          .into_response()
+      } else {
+        (StatusCode::OK, axum::Json(classifications)).into_response()
+      }
     }
     Err(e) => {
       error!("Database error fetching classifications: {}", e);
@@ -324,8 +343,191 @@ async fn get_classifications(
         StatusCode::INTERNAL_SERVER_ERROR,
         axum::Json(Vec::<db::ClassificationDetail>::new()),
       )
+        .into_response()
     }
   }
+}
+
+fn render_classifications_html(
+  classifications: &[db::ClassificationDetail],
+  params: &ClassificationsParams,
+) -> String {
+  let filter_info = params
+    .classification_type
+    .as_ref()
+    .map(|ct| format!(" (filtered by type: {})", ct))
+    .unwrap_or_default();
+
+  let rows: String = classifications
+    .iter()
+    .map(|c| {
+      format!(
+        r#"<tr>
+          <td>{}</td>
+          <td>{}</td>
+          <td>{}</td>
+          <td>{:.2}</td>
+          <td class="reasoning">{}</td>
+          <td>{}</td>
+          <td>{}</td>
+          <td>{}</td>
+          <td>{}</td>
+        </tr>"#,
+        html_escape(&c.domain),
+        html_escape(&c.classification_type),
+        if c.is_matching_site {
+          "Yes"
+        } else {
+          "No"
+        },
+        c.confidence,
+        html_escape(c.reasoning.as_deref().unwrap_or("")),
+        html_escape(&c.model),
+        c.valid_on.format("%Y-%m-%d %H:%M:%S"),
+        c.valid_until.format("%Y-%m-%d %H:%M:%S"),
+        c.created_at.format("%Y-%m-%d %H:%M:%S"),
+      )
+    })
+    .collect();
+
+  format!(
+    r#"<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Classifications{}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 20px;
+      background: #f5f5f5;
+    }}
+    h1 {{
+      color: #333;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      background: white;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }}
+    th, td {{
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #ddd;
+    }}
+    th {{
+      background: #4CAF50;
+      color: white;
+      cursor: pointer;
+      user-select: none;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }}
+    th:hover {{
+      background: #45a049;
+    }}
+    th.sorted-asc::after {{
+      content: " ▲";
+    }}
+    th.sorted-desc::after {{
+      content: " ▼";
+    }}
+    tr:hover {{
+      background: #f5f5f5;
+    }}
+    .reasoning {{
+      max-width: 400px;
+      white-space: normal;
+      word-wrap: break-word;
+    }}
+    .count {{
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }}
+  </style>
+</head>
+<body>
+  <h1>Classifications{}</h1>
+  <div class="count">Total: {} classification(s)</div>
+  <table id="classificationsTable">
+    <thead>
+      <tr>
+        <th onclick="sortTable(0)">Domain</th>
+        <th onclick="sortTable(1)">Type</th>
+        <th onclick="sortTable(2)">Match</th>
+        <th onclick="sortTable(3)">Confidence</th>
+        <th onclick="sortTable(4)">Reasoning</th>
+        <th onclick="sortTable(5)">Model</th>
+        <th onclick="sortTable(6)">Valid On</th>
+        <th onclick="sortTable(7)">Valid Until</th>
+        <th onclick="sortTable(8)">Created At</th>
+      </tr>
+    </thead>
+    <tbody>
+      {}
+    </tbody>
+  </table>
+  <script>
+    let sortDirection = {{}};
+
+    function sortTable(columnIndex) {{
+      const table = document.getElementById('classificationsTable');
+      const tbody = table.querySelector('tbody');
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+
+      const currentDirection = sortDirection[columnIndex] || 'asc';
+      const newDirection = currentDirection === 'asc' ? 'desc' : 'asc';
+      sortDirection = {{ [columnIndex]: newDirection }};
+
+      rows.sort((a, b) => {{
+        let aValue = a.cells[columnIndex].textContent.trim();
+        let bValue = b.cells[columnIndex].textContent.trim();
+
+        // Try to parse as number.
+        const aNum = parseFloat(aValue);
+        const bNum = parseFloat(bValue);
+
+        if (!isNaN(aNum) && !isNaN(bNum)) {{
+          return newDirection === 'asc' ? aNum - bNum : bNum - aNum;
+        }}
+
+        // String comparison.
+        if (newDirection === 'asc') {{
+          return aValue.localeCompare(bValue);
+        }} else {{
+          return bValue.localeCompare(aValue);
+        }}
+      }});
+
+      rows.forEach(row => tbody.appendChild(row));
+
+      // Update header indicators.
+      table.querySelectorAll('th').forEach((th, idx) => {{
+        th.classList.remove('sorted-asc', 'sorted-desc');
+        if (idx === columnIndex) {{
+          th.classList.add(`sorted-${{newDirection}}`);
+        }}
+      }});
+    }}
+  </script>
+</body>
+</html>"#,
+    filter_info,
+    filter_info,
+    classifications.len(),
+    rows
+  )
+}
+
+fn html_escape(s: &str) -> String {
+  s.replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+    .replace('\'', "&#x27;")
 }
 
 #[derive(Deserialize)]
