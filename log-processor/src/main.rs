@@ -1,20 +1,10 @@
 use clap::Parser;
-use dns_smart_block_common::db_models::ClassificationEventInsert;
 use dns_smart_block_log_processor::{
-  ProcessorError, Result,
-  cli_args::CliArgs,
-  database_url::{construct_database_url, sanitize_database_url},
-  db,
-  log_parser::LogParser,
-  log_source::LogSource,
-  queue::QueuePublisher,
+  ProcessorError, Result, cli_args::CliArgs, log_parser::LogParser,
+  log_source::LogSource, queue::QueuePublisher,
 };
 use futures::StreamExt;
-use sqlx::PgPool;
-use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,27 +18,10 @@ async fn main() -> Result<()> {
   info!("NATS URL: {}", args.nats_url);
   info!("NATS subject: {}", args.nats_subject);
 
-  // Construct database URL with password if provided
-  let database_url = construct_database_url(
-    &args.database_url,
-    args.database_password_file.as_deref(),
-  )?;
-
-  info!("Database URL: {}", sanitize_database_url(&database_url));
-
-  // Connect to PostgreSQL
-  info!("Connecting to PostgreSQL...");
-  let pool = PgPool::connect(&database_url).await?;
-  info!("Connected to PostgreSQL successfully");
-
   // Initialize components
   let parser = LogParser::new()?;
   let queue =
     QueuePublisher::new(&args.nats_url, args.nats_subject.clone()).await?;
-
-  // Track seen domains to avoid duplicate processing
-  let seen_domains: Arc<Mutex<HashSet<String>>> =
-    Arc::new(Mutex::new(HashSet::new()));
 
   // Create log source
   let log_source = if args.is_command_source() {
@@ -71,54 +44,11 @@ async fn main() -> Result<()> {
     match line_result {
       Ok(line) => {
         if let Some(domain) = parser.parse_log_line(&line) {
-          // Check if we've already seen this domain
-          let mut seen = seen_domains.lock().await;
-          if seen.contains(&domain) {
-            continue;
-          }
-
           info!("Found domain in log: {}", domain);
 
-          // Check if domain should be queued based on event history
-          match db::should_queue_domain(&pool, &domain).await {
-            Ok(false) => {
-              info!(
-                "Domain {} already queued/classified/in-progress, skipping",
-                domain
-              );
-              seen.insert(domain);
-              continue;
-            }
-            Ok(true) => {
-              info!("Domain {} should be queued", domain);
-            }
-            Err(e) => {
-              warn!(
-                "Failed to check domain {} status in database: {}. Will queue anyway.",
-                domain, e
-              );
-            }
-          }
-
-          // Insert queued event
-          if let Err(e) = (ClassificationEventInsert {
-            domain: domain.clone(),
-            action: "queued".to_string(),
-            action_data: serde_json::json!({}),
-            prompt_id: None,
-          })
-          .insert(&pool)
-          .await
-          {
-            error!("Failed to insert queued event for {}: {}", domain, e);
-            // Continue anyway - queue the domain
-          }
-
-          // Publish to queue
           match queue.publish_domain(&domain).await {
             Ok(()) => {
-              info!("Successfully queued domain: {}", domain);
-              seen.insert(domain);
+              info!("Queued domain: {}", domain);
             }
             Err(e) => {
               error!("Failed to publish domain {} to queue: {}", domain, e);

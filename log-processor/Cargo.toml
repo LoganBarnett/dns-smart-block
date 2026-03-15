@@ -26,7 +26,6 @@ regex = "*"
 notify = "6"
 chrono = "*"
 base64ct = { workspace = true }
-sqlx = { workspace = true }
 url = "*"
 
 [dev-dependencies]

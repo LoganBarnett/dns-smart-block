@@ -21,14 +21,6 @@ pub struct CliArgs {
   /// NATS subject/topic to publish domains to
   #[arg(long, env = "NATS_SUBJECT", default_value = "dns.domains")]
   pub nats_subject: String,
-
-  /// PostgreSQL connection URL (without password if using password file)
-  #[arg(long, env = "DATABASE_URL")]
-  pub database_url: String,
-
-  /// Path to file containing database password
-  #[arg(long, env = "DATABASE_PASSWORD_FILE")]
-  pub database_password_file: Option<PathBuf>,
 }
 
 impl CliArgs {

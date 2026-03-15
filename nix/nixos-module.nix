@@ -443,14 +443,11 @@ in {
         after =
           [ "network.target" ]
           ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service"
-          ++ lib.optional cfg.database.enable "postgresql.service"
           ++ lib.optional
             (lib.hasPrefix "cmd:journalctl" cfg.logProcessor.logSource)
             "systemd-journald.service"
         ;
-        wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service"
-                ++ lib.optional cfg.database.enable "postgresql.service";
-        requires = lib.optional cfg.database.enable "postgresql.service";
+        wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service";
 
         serviceConfig = {
           Type = "simple";
@@ -463,15 +460,12 @@ in {
             "systemd-journal";
 
           ExecStart = let
-            args = lib.concatStringsSep " " ([
+            args = lib.concatStringsSep " " [
               "${packages.log-processor}/bin/dns-smart-block-log-processor"
               "--log-source '${cfg.logProcessor.logSource}'"
               "--nats-url '${cfg.nats.url}'"
               "--nats-subject '${cfg.nats.subject}'"
-              "--database-url '${databaseUrl}'"
-            ] ++ lib.optionals (cfg.database.passwordFile != null) [
-              "--database-password-file '${cfg.database.passwordFile}'"
-            ]);
+            ];
           in args;
 
           Restart = "always";
