@@ -86,6 +86,23 @@ tr:hover {
   word-wrap: break-word;
 }
 
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.search-bar input[type="search"] {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  width: 240px;
+}
+
 .count {
   color: var(--text-secondary);
   font-size: 14px;

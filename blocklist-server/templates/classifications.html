@@ -8,6 +8,11 @@
 <body>
   <h1>Classifications{{FILTER_INFO}}</h1>
   {{ADMIN_ACTIONS}}
+  <div class="search-bar">
+    <input type="search" id="domainSearch" placeholder="Search domain…" oninput="filterTable()">
+    <input type="search" id="reasoningSearch" placeholder="Search reasoning…" oninput="filterTable()">
+    <span class="count" id="visibleCount"></span>
+  </div>
   <div class="count">Total: {{COUNT}} classification(s)</div>
   <table id="classificationsTable">
     <thead>

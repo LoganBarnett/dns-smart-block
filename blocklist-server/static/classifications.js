@@ -1,5 +1,30 @@
 let sortDirections = {};
 
+function filterTable() {
+  const domainTerm = document.getElementById('domainSearch').value.toLowerCase();
+  const reasoningTerm = document.getElementById('reasoningSearch').value.toLowerCase();
+  const tbody = document.querySelector('#classificationsTable tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+
+  let visible = 0;
+  rows.forEach(row => {
+    // Domain is column 0, reasoning is column 4.
+    const domain = row.cells[0].textContent.toLowerCase();
+    const reasoning = row.cells[4].textContent.toLowerCase();
+    const show =
+      domain.includes(domainTerm) && reasoning.includes(reasoningTerm);
+    row.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+
+  const countEl = document.getElementById('visibleCount');
+  if (domainTerm || reasoningTerm) {
+    countEl.textContent = `Showing ${visible} of ${rows.length}`;
+  } else {
+    countEl.textContent = '';
+  }
+}
+
 function sortTable(tableId, columnIndex) {
   const table = document.getElementById(tableId);
   const tbody = table.querySelector('tbody');
