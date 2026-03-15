@@ -332,15 +332,15 @@ pub async fn rebuild_projections_from_events(
     let rows = sqlx::query(
         r#"
         WITH latest_classified_events AS (
-            SELECT DISTINCT ON (domain, (data->>'classification_type'))
+            SELECT DISTINCT ON (domain, (action_data->>'classification_type'))
                 domain,
-                data->>'classification_type' as classification_type,
-                (data->>'is_matching_site')::boolean as is_matching_site,
-                (data->>'confidence')::real as confidence,
+                action_data->>'classification_type' as classification_type,
+                (action_data->>'is_matching_site')::boolean as is_matching_site,
+                (action_data->>'confidence')::real as confidence,
                 created_at
             FROM domain_classification_events
             WHERE action = 'classified'
-            ORDER BY domain, (data->>'classification_type'), created_at DESC
+            ORDER BY domain, (action_data->>'classification_type'), created_at DESC
         )
         SELECT
             domain,
