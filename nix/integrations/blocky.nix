@@ -57,6 +57,25 @@ in {
   };
 
   config = mkIf blockyIntegrationCfg.enable {
+    # Wire the log processor to consume Blocky's journald output and parse only
+    # successfully resolved external queries.
+    services.dns-smart-block.logProcessor = {
+      logSource = lib.mkDefault
+        "cmd:journalctl --follow --unit=blocky.service";
+
+      # Extracts the domain from Blocky's structured log field, stripping the
+      # trailing FQDN dot that Blocky always appends.
+      domainPattern = lib.mkDefault
+        ''question_name=(\w(?:[\w-]*\w)?(?:\.\w(?:[\w-]*\w)?)+)\.'';
+
+      # Only process lines where Blocky actually forwarded the query to an
+      # upstream resolver.  This excludes blocked (response_type=BLOCKED),
+      # cached (response_type=CACHED), local/conditional
+      # (response_type=CONDITIONAL), and NXDOMAIN entries — all of which would
+      # produce either garbage or already-blocked domains.
+      lineFilter = lib.mkDefault "response_type=RESOLVED";
+    };
+
     # Configure blocky blacklists based on either auto-mapping or manual mapping.
     services.blocky.settings.blocking.blackLists =
       if blockyIntegrationCfg.autoMapAllBlocklists then

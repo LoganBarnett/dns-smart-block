@@ -3,54 +3,48 @@ use regex::Regex;
 use tracing::debug;
 
 pub struct LogParser {
-  domain_patterns: Vec<Regex>,
+  domain_pattern: Regex,
+  capture_group: usize,
+  line_filter: Option<Regex>,
 }
 
 impl LogParser {
-  pub fn new() -> Result<Self> {
-    // Common DNS log patterns that indicate a successful query
-    let patterns = vec![
-      // Blocky DNS format: "question_name=domain. question_type=type"
-      r"question_name=([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)\.",
-      // dnsdist query format: "Query from IP:port: domain IN type"
-      r"Query from [^\s]+: ([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*) IN",
-      // Common DNS log format: "client IP#port (domain)"
-      r"client [^\s]+#\d+ \(([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)\)",
-      // Simple format: "query: domain"
-      r"query:\s+([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)",
-      // dnsdist with domain followed by query type
-      r"\s([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)\s+(A|AAAA|NS|MX|TXT|CNAME)\s",
-      // Systemd journal format with QUERY or DOMAIN field
-      r"(?:QUERY|DOMAIN)=([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)",
-    ];
-
-    let domain_patterns = patterns
-      .into_iter()
-      .map(|p| Regex::new(p))
-      .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    Ok(Self { domain_patterns })
+  pub fn new(
+    domain_pattern: &str,
+    capture_group: usize,
+    line_filter: Option<&str>,
+  ) -> Result<Self> {
+    let domain_pattern = Regex::new(domain_pattern)?;
+    let line_filter = line_filter.map(Regex::new).transpose()?;
+    Ok(Self {
+      domain_pattern,
+      capture_group,
+      line_filter,
+    })
   }
 
-  /// Parse a log line and extract domain if it represents a DNS query
+  /// Parse a log line and extract a domain if it passes the line filter and
+  /// the domain pattern matches.
   pub fn parse_log_line(&self, line: &str) -> Option<String> {
-    // Skip empty lines
     if line.trim().is_empty() {
       return None;
     }
 
     debug!("Parsing log line: {}", line);
 
-    for pattern in &self.domain_patterns {
-      if let Some(captures) = pattern.captures(line) {
-        if let Some(domain) = captures.get(1) {
-          let domain = domain.as_str();
+    if let Some(ref filter) = self.line_filter {
+      if !filter.is_match(line) {
+        debug!("Line filter did not match, skipping");
+        return None;
+      }
+    }
 
-          // Validate domain has at least one dot and looks reasonable
-          if domain.contains('.') && is_valid_domain(domain) {
-            debug!("Extracted domain: {}", domain);
-            return Some(domain.to_lowercase());
-          }
+    if let Some(captures) = self.domain_pattern.captures(line) {
+      if let Some(domain) = captures.get(self.capture_group) {
+        let domain = domain.as_str();
+        if is_valid_domain(domain) {
+          debug!("Extracted domain: {}", domain);
+          return Some(domain.to_lowercase());
         }
       }
     }
@@ -60,20 +54,12 @@ impl LogParser {
   }
 }
 
-impl Default for LogParser {
-  fn default() -> Self {
-    Self::new().expect("Failed to create default LogParser")
-  }
-}
-
-/// Validate that a domain looks reasonable
+/// Validate that a domain looks reasonable.
 fn is_valid_domain(domain: &str) -> bool {
-  // Must have at least one dot
   if !domain.contains('.') {
     return false;
   }
 
-  // Must not start or end with dot or hyphen
   if domain.starts_with('.')
     || domain.ends_with('.')
     || domain.starts_with('-')
@@ -82,17 +68,14 @@ fn is_valid_domain(domain: &str) -> bool {
     return false;
   }
 
-  // Must not be too long (max domain length is 253 characters)
   if domain.len() > 253 {
     return false;
   }
 
-  // Should not contain spaces
   if domain.contains(' ') {
     return false;
   }
 
-  // Filter out common localhost/internal domains
   let lower = domain.to_lowercase();
   if lower == "localhost"
     || lower.ends_with(".local")
@@ -109,81 +92,113 @@ fn is_valid_domain(domain: &str) -> bool {
 mod tests {
   use super::*;
 
+  // Blocky pattern used across unit tests.
+  const BLOCKY_PATTERN: &str =
+    r"question_name=(\w(?:[\w-]*\w)?(?:\.\w(?:[\w-]*\w)?)+)\.";
+  const BLOCKY_FILTER: &str = r"response_type=RESOLVED";
+
+  fn blocky_parser() -> LogParser {
+    LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap()
+  }
+
   #[test]
-  fn test_parse_dnsdist_query_format() {
-    let parser = LogParser::new().unwrap();
+  fn test_parse_blocky_resolved() {
+    let parser = blocky_parser();
 
-    let line = "Query from 192.168.1.100:54321: example.com IN A";
-    assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
-
-    let line = "Query from 10.0.0.5:12345: test.example.org IN AAAA";
+    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved \
+      answer=A (13.107.213.69) client_ip=127.0.0.1 \
+      question_name=minecraft.net. question_type=A \
+      response_code=NOERROR response_reason=RESOLVED (tcp+udp:1.1.1.1) \
+      response_type=RESOLVED";
     assert_eq!(
       parser.parse_log_line(line),
-      Some("test.example.org".to_string())
+      Some("minecraft.net".to_string())
     );
   }
 
   #[test]
-  fn test_parse_client_format() {
-    let parser = LogParser::new().unwrap();
+  fn test_blocky_line_filter_excludes_blocked() {
+    let parser = blocky_parser();
 
-    let line =
-      "client 192.168.1.1#53210 (example.com): query: example.com IN A";
+    // Blocky returns NOERROR for blocked queries too (0.0.0.0 sinkhole) — the
+    // line filter on response_type=RESOLVED is what excludes these.
+    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved \
+      answer=A (0.0.0.0) client_ip=192.168.1.1 \
+      question_name=adsite.com. question_type=A \
+      response_code=NOERROR response_reason=BLOCKED response_type=BLOCKED";
+    assert_eq!(parser.parse_log_line(line), None);
+  }
+
+  #[test]
+  fn test_blocky_line_filter_excludes_cached() {
+    let parser = blocky_parser();
+
+    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved \
+      question_name=example.com. question_type=A \
+      response_code=NOERROR response_type=CACHED";
+    assert_eq!(parser.parse_log_line(line), None);
+  }
+
+  #[test]
+  fn test_blocky_line_filter_excludes_nxdomain_suffix_spam() {
+    let parser = blocky_parser();
+
+    // These are the .proton/.proton.proton suffix entries that caused the
+    // domain-suffix-appending bug.  They are always CACHED/NXDOMAIN and never
+    // RESOLVED, so the line filter drops them cleanly.
+    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved \
+      question_name=history.google.com.proton.proton. question_type=A \
+      response_code=NXDOMAIN response_type=CACHED";
+    assert_eq!(parser.parse_log_line(line), None);
+  }
+
+  #[test]
+  fn test_no_line_filter() {
+    // Without a line filter every line with a matching domain pattern passes.
+    let parser = LogParser::new(BLOCKY_PATTERN, 1, None).unwrap();
+
+    let line = "question_name=example.com. response_type=CACHED";
     assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
   }
 
   #[test]
-  fn test_parse_simple_query_format() {
-    let parser = LogParser::new().unwrap();
+  fn test_custom_capture_group() {
+    // Pattern where group 1 is a prefix we don't want and group 2 is the
+    // domain — verifies capture_group selection works.
+    let parser = LogParser::new(
+      r"(prefix\.)([a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z0-9][a-zA-Z0-9-]*)",
+      2,
+      None,
+    )
+    .unwrap();
 
-    let line = "query: example.com";
-    assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
-  }
-
-  #[test]
-  fn test_parse_domain_with_query_type() {
-    let parser = LogParser::new().unwrap();
-
-    let line = "2024-01-16 10:00:00 example.com A query from 192.168.1.1";
+    let line = "prefix.example.com";
     assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
   }
 
   #[test]
   fn test_invalid_domains_rejected() {
-    let parser = LogParser::new().unwrap();
+    let parser = blocky_parser();
 
-    // No TLD
-    let line = "Query from 192.168.1.100:54321: localhost IN A";
-    assert_eq!(parser.parse_log_line(line), None);
-
-    // .local domain
-    let line = "Query from 192.168.1.100:54321: myhost.local IN A";
-    assert_eq!(parser.parse_log_line(line), None);
+    // Local domains should not pass is_valid_domain.
+    let local = "[2026-02-04 20:33:21]  INFO queryLog: query resolved \
+      question_name=myhost.local. response_type=RESOLVED";
+    assert_eq!(parser.parse_log_line(local), None);
   }
 
   #[test]
-  fn test_case_insensitive() {
-    let parser = LogParser::new().unwrap();
+  fn test_case_normalised_to_lowercase() {
+    let parser = blocky_parser();
 
-    let line = "Query from 192.168.1.100:54321: EXAMPLE.COM IN A";
+    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved \
+      question_name=EXAMPLE.COM. response_type=RESOLVED";
     assert_eq!(parser.parse_log_line(line), Some("example.com".to_string()));
   }
 
   #[test]
-  fn test_parse_blocky_format() {
-    let parser = LogParser::new().unwrap();
-
-    // Typical Blocky log line
-    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved answer=A (13.107.213.69) client_ip=127.0.0.1 question_name=minecraft.net. question_type=A response_code=NOERROR";
-    assert_eq!(
-      parser.parse_log_line(line),
-      Some("minecraft.net".to_string())
-    );
-
-    let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved question_name=steampowered.com. question_type=A";
-    assert_eq!(
-      parser.parse_log_line(line),
-      Some("steampowered.com".to_string())
-    );
+  fn test_empty_line_returns_none() {
+    let parser = blocky_parser();
+    assert_eq!(parser.parse_log_line(""), None);
+    assert_eq!(parser.parse_log_line("   "), None);
   }
 }

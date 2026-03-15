@@ -15,11 +15,20 @@ async fn main() -> Result<()> {
 
   info!("Starting DNS Smart Block Log Processor");
   info!("Log source: {}", args.log_source);
+  info!("Domain pattern: {}", args.domain_pattern);
+  info!("Capture group: {}", args.domain_capture_group);
+  if let Some(ref filter) = args.line_filter {
+    info!("Line filter: {}", filter);
+  }
   info!("NATS URL: {}", args.nats_url);
   info!("NATS subject: {}", args.nats_subject);
 
   // Initialize components
-  let parser = LogParser::new()?;
+  let parser = LogParser::new(
+    &args.domain_pattern,
+    args.domain_capture_group,
+    args.line_filter.as_deref(),
+  )?;
   let queue =
     QueuePublisher::new(&args.nats_url, args.nats_subject.clone()).await?;
 

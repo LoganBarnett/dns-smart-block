@@ -3,47 +3,63 @@ use dns_smart_block_log_processor::{
 };
 use futures::StreamExt;
 
-/// Sample DNS log lines in various formats
-const SAMPLE_DNS_LOGS: &[&str] = &[
-  "Query from 192.168.1.100:54321: gaming-site.com IN A",
-  "Query from 192.168.1.101:12345: news-site.com IN AAAA",
-  "client 10.0.0.5#53210 (social-media.com): query",
-  "2024-01-16 10:00:00 streaming-video.net A query from 192.168.1.1",
-  "Query from 192.168.1.102:99999: localhost IN A", // Should be filtered
-  "Query from 192.168.1.103:11111: myhost.local IN A", // Should be filtered
-];
+const BLOCKY_PATTERN: &str =
+  r"question_name=(\w(?:[\w-]*\w)?(?:\.\w(?:[\w-]*\w)?)+)\.";
+const BLOCKY_FILTER: &str = r"response_type=RESOLVED";
+
+fn blocky_resolved(question_name: &str) -> String {
+  format!(
+    "[2026-01-16 10:00:00]  INFO queryLog: query resolved \
+     answer=A (1.2.3.4) client_ip=192.168.1.1 \
+     question_name={question_name}. question_type=A \
+     response_code=NOERROR response_reason=RESOLVED (tcp+udp:1.1.1.1) \
+     response_type=RESOLVED"
+  )
+}
+
+fn blocky_cached(question_name: &str) -> String {
+  format!(
+    "[2026-01-16 10:00:00]  INFO queryLog: query resolved \
+     question_name={question_name}. question_type=A \
+     response_code=NOERROR response_type=CACHED"
+  )
+}
+
+fn blocky_blocked(question_name: &str) -> String {
+  format!(
+    "[2026-01-16 10:00:00]  INFO queryLog: query resolved \
+     answer=A (0.0.0.0) client_ip=192.168.1.1 \
+     question_name={question_name}. question_type=A \
+     response_code=NOERROR response_reason=BLOCKED response_type=BLOCKED"
+  )
+}
 
 #[tokio::test]
-async fn test_log_parser_extracts_domains() {
-  let parser = LogParser::new().unwrap();
+async fn test_log_parser_extracts_resolved_domains_only() {
+  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
 
-  let mut extracted_domains = Vec::new();
+  let log_lines = [
+    blocky_resolved("gaming-site.com"),
+    blocky_resolved("news-site.com"),
+    blocky_cached("social-media.com"), // should be filtered out
+    blocky_blocked("blocked-site.com"), // should be filtered out
+    blocky_resolved("myhost.local"),   // should be filtered by is_valid_domain
+  ];
 
-  for log_line in SAMPLE_DNS_LOGS {
-    if let Some(domain) = parser.parse_log_line(log_line) {
-      extracted_domains.push(domain);
-    }
-  }
+  let mut extracted: Vec<String> = log_lines
+    .iter()
+    .filter_map(|line| parser.parse_log_line(line))
+    .collect();
+  extracted.sort();
 
-  // Should extract 4 valid domains (gaming-site.com, news-site.com, social-media.com, streaming-video.net)
-  // localhost and myhost.local should be filtered out
-  assert_eq!(extracted_domains.len(), 4);
-  assert!(extracted_domains.contains(&"gaming-site.com".to_string()));
-  assert!(extracted_domains.contains(&"news-site.com".to_string()));
-  assert!(extracted_domains.contains(&"social-media.com".to_string()));
-  assert!(extracted_domains.contains(&"streaming-video.net".to_string()));
-
-  // Verify filtered domains are not present
-  assert!(!extracted_domains.contains(&"localhost".to_string()));
-  assert!(!extracted_domains.contains(&"myhost.local".to_string()));
+  assert_eq!(extracted, vec!["gaming-site.com", "news-site.com"]);
 }
 
 #[tokio::test]
 async fn test_log_source_command_stream() {
-  // Create a command that outputs DNS log lines
   let source = LogSource::from_command(vec![
     "echo".to_string(),
-    "Query from 192.168.1.100:54321: test-domain.com IN A".to_string(),
+    blocky_resolved("test-domain.com"),
   ]);
 
   let mut stream = source.into_stream().await.unwrap();
@@ -56,26 +72,23 @@ async fn test_log_source_command_stream() {
 }
 
 #[tokio::test]
-async fn test_full_parsing_flow() {
-  let parser = LogParser::new().unwrap();
+async fn test_full_parsing_flow_deduplication() {
+  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
 
-  // Simulate processing a stream of log lines
-  let log_lines = vec![
-    "Query from 192.168.1.100:54321: gaming-site.com IN A",
-    "Query from 192.168.1.101:12345: gaming-site.com IN A", // Duplicate
-    "Query from 192.168.1.102:99999: news-site.com IN AAAA",
-    "Query from 192.168.1.103:11111: localhost IN A", // Invalid
+  let log_lines = [
+    blocky_resolved("gaming-site.com"),
+    blocky_resolved("gaming-site.com"), // duplicate
+    blocky_resolved("news-site.com"),
+    blocky_resolved("localhost"), // invalid, no dot after filtering
   ];
 
   let mut unique_domains = std::collections::HashSet::new();
-
-  for line in log_lines {
+  for line in &log_lines {
     if let Some(domain) = parser.parse_log_line(line) {
       unique_domains.insert(domain);
     }
   }
 
-  // Should have 2 unique valid domains (gaming-site.com, news-site.com)
   assert_eq!(unique_domains.len(), 2);
   assert!(unique_domains.contains("gaming-site.com"));
   assert!(unique_domains.contains("news-site.com"));
@@ -83,88 +96,56 @@ async fn test_full_parsing_flow() {
 
 #[tokio::test]
 async fn test_log_parser_with_various_dns_record_types() {
-  let parser = LogParser::new().unwrap();
+  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
 
-  let test_cases = vec![
-    (
-      "Query from 192.168.1.1:1234: example.com IN A",
-      Some("example.com"),
-    ),
-    (
-      "Query from 192.168.1.1:1234: example.com IN AAAA",
-      Some("example.com"),
-    ),
-    (
-      "Query from 192.168.1.1:1234: example.com IN MX",
-      Some("example.com"),
-    ),
-    (
-      "Query from 192.168.1.1:1234: example.com IN TXT",
-      Some("example.com"),
-    ),
-    (
-      "Query from 192.168.1.1:1234: example.com IN NS",
-      Some("example.com"),
-    ),
-    (
-      "Query from 192.168.1.1:1234: example.com IN CNAME",
-      Some("example.com"),
-    ),
-  ];
-
-  for (log_line, expected_domain) in test_cases {
-    let result = parser.parse_log_line(log_line);
+  for record_type in ["A", "AAAA", "MX", "TXT", "NS", "CNAME"] {
+    let line = format!(
+      "[2026-01-16 10:00:00]  INFO queryLog: query resolved \
+       answer={record_type} (1.2.3.4) client_ip=192.168.1.1 \
+       question_name=example.com. question_type={record_type} \
+       response_code=NOERROR response_type=RESOLVED"
+    );
     assert_eq!(
-      result.as_deref(),
-      expected_domain,
-      "Failed to parse: {}",
-      log_line
+      parser.parse_log_line(&line),
+      Some("example.com".to_string()),
+      "Failed for record type {record_type}"
     );
   }
 }
 
 #[tokio::test]
 async fn test_case_insensitive_domain_extraction() {
-  let parser = LogParser::new().unwrap();
+  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
 
-  let log_lines = vec![
-    "Query from 192.168.1.1:1234: EXAMPLE.COM IN A",
-    "Query from 192.168.1.1:1234: Example.Com IN A",
-    "Query from 192.168.1.1:1234: example.com IN A",
-  ];
+  let domains =
+    ["EXAMPLE.COM", "Example.Com", "example.com"].map(blocky_resolved);
 
-  let mut domains = Vec::new();
-  for line in log_lines {
-    if let Some(domain) = parser.parse_log_line(line) {
-      domains.push(domain);
-    }
-  }
+  let extracted: Vec<String> = domains
+    .iter()
+    .filter_map(|line| parser.parse_log_line(line))
+    .collect();
 
-  // All should be normalized to lowercase
-  assert_eq!(domains.len(), 3);
-  assert!(domains.iter().all(|d| d == "example.com"));
+  assert_eq!(extracted.len(), 3);
+  assert!(extracted.iter().all(|d| d == "example.com"));
 }
 
 #[test]
 fn test_domain_validation_edge_cases() {
-  let parser = LogParser::new().unwrap();
+  let parser = LogParser::new(BLOCKY_PATTERN, 1, Some(BLOCKY_FILTER)).unwrap();
 
-  // Domains that should NOT be extracted
-  let invalid_cases = vec![
-    "Query from 192.168.1.1:1234: .example.com IN A", // Starts with dot
-    "Query from 192.168.1.1:1234: example.com. IN A", // Ends with dot (might be valid in some contexts, but we filter it)
-    "Query from 192.168.1.1:1234: -example.com IN A", // Starts with hyphen
-    "Query from 192.168.1.1:1234: example.com- IN A", // Ends with hyphen
+  // The Blocky pattern requires a trailing dot, so domains that end with a
+  // hyphen or start with a hyphen won't match the regex at all.  Domains
+  // starting with a dot also won't match.  These are tested to confirm None.
+  let invalid_cases = [
+    blocky_resolved("-example.com"),
+    blocky_resolved("example-.com"),
   ];
 
-  for invalid_line in invalid_cases {
-    let result = parser.parse_log_line(invalid_line);
-    // These should either return None or not match the pattern
-    if let Some(domain) = result {
-      panic!(
-        "Should not have extracted domain from invalid case: {}. Got: {}",
-        invalid_line, domain
-      );
-    }
+  for line in &invalid_cases {
+    assert_eq!(
+      parser.parse_log_line(line),
+      None,
+      "Should not have extracted domain from: {line}"
+    );
   }
 }

@@ -9,10 +9,26 @@ pub struct CliArgs {
   #[command(flatten)]
   pub logging: LoggingArgs,
 
-  /// Log source: either a file path or a command to run (prefix with 'cmd:')
-  /// Examples: '/var/log/dns.log' or 'cmd:journalctl -f -u dns-server'
+  /// Log source: either a file path or a command to run (prefix with 'cmd:').
+  /// Examples: '/var/log/dns.log' or 'cmd:journalctl --follow --unit=blocky.service'
   #[arg(long, env = "LOG_SOURCE")]
   pub log_source: String,
+
+  /// Regex pattern to extract the domain from a log line.  Use a capture group
+  /// to mark the domain portion; see --domain-capture-group.
+  /// Example for Blocky: 'question_name=(\w(?:[\w-]*\w)?(?:\.\w(?:[\w-]*\w)?)+)\.'
+  #[arg(long, env = "DOMAIN_PATTERN")]
+  pub domain_pattern: String,
+
+  /// Which capture group in --domain-pattern contains the domain (1-indexed).
+  #[arg(long, env = "DOMAIN_CAPTURE_GROUP", default_value = "1")]
+  pub domain_capture_group: usize,
+
+  /// Optional regex; when set, only log lines matching this pattern are
+  /// considered for domain extraction.
+  /// Example for Blocky: 'response_type=RESOLVED'
+  #[arg(long, env = "LINE_FILTER")]
+  pub line_filter: Option<String>,
 
   /// NATS server URL
   #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]

@@ -143,11 +143,46 @@ in {
 
       logSource = mkOption {
         type = types.str;
-        default = "cmd:journalctl -f -u dns-server";
+        default = "cmd:journalctl --follow --unit=dns-server.service";
         description = ''
-          Log source to watch. Can be:
+          Log source to watch.  Can be:
           - A file path: /var/log/dns.log
-          - A command: cmd:journalctl -f -u dns-server
+          - A command: cmd:journalctl --follow --unit=blocky.service
+        '';
+      };
+
+      domainPattern = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = ''question_name=(\w(?:[\w-]*\w)?(?:\.\w(?:[\w-]*\w)?)+)\.'';
+        description = ''
+          Regex pattern used to extract a domain from each log line.  One
+          capture group must mark the domain; select it with
+          <option>domainCaptureGroup</option>.
+
+          Must be set either directly or via an integration such as
+          <option>services.dns-smart-block.integrations.blocky.enable</option>.
+        '';
+      };
+
+      domainCaptureGroup = mkOption {
+        type = types.ints.positive;
+        default = 1;
+        description = ''
+          Which capture group in <option>domainPattern</option> contains the
+          domain (1-indexed).
+        '';
+      };
+
+      lineFilter = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "response_type=RESOLVED";
+        description = ''
+          Optional regex; when set, only log lines matching this pattern are
+          considered for domain extraction.  Use this to restrict processing to
+          successfully resolved queries (e.g. <literal>response_type=RESOLVED</literal>
+          for Blocky) and avoid classifying blocked or non-existent domains.
         '';
       };
     };
@@ -564,12 +599,16 @@ in {
             "systemd-journal";
 
           ExecStart = let
-            args = lib.concatStringsSep " " [
+            args = lib.concatStringsSep " " ([
               "${packages.log-processor}/bin/dns-smart-block-log-processor"
               "--log-source '${cfg.logProcessor.logSource}'"
+              "--domain-pattern '${cfg.logProcessor.domainPattern}'"
+              "--domain-capture-group ${toString cfg.logProcessor.domainCaptureGroup}"
               "--nats-url '${cfg.nats.url}'"
               "--nats-subject '${cfg.nats.subject}'"
-            ];
+            ] ++ lib.optional (cfg.logProcessor.lineFilter != null)
+              "--line-filter '${cfg.logProcessor.lineFilter}'"
+            );
           in args;
 
           Restart = "always";
@@ -739,6 +778,16 @@ in {
           cfg.logProcessor.enable -> (cfg.nats.enable || cfg.nats.url != "");
         message = ''
           NATS must be enabled or URL configured when log processor is enabled
+        '';
+      }
+      {
+        assertion =
+          cfg.logProcessor.enable -> cfg.logProcessor.domainPattern != null;
+        message = ''
+          services.dns-smart-block.logProcessor.domainPattern must be set when
+          the log processor is enabled.  Enable
+          services.dns-smart-block.integrations.blocky to get a sensible
+          default for Blocky logs.
         '';
       }
       {
