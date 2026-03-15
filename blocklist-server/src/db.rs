@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use dns_smart_block_common::db_models::{ClassificationInsert, DomainUpsert};
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgQueryResult};
+use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -442,129 +442,6 @@ pub async fn rebuild_projections_from_events(
   }
 
   tx.commit().await?;
-
-  Ok(count)
-}
-
-/// Expire all currently valid classifications for a domain.
-/// Sets valid_until = NOW() and inserts an "expired" event.
-pub async fn domain_expire(
-  tx: &mut Transaction<'_, Postgres>,
-  domain: String,
-) -> Result<PgQueryResult, DbError> {
-  let now = Utc::now();
-
-  // Expire all currently valid classifications for this domain
-  let result = sqlx::query(
-    r#"
-    UPDATE domain_classifications
-    SET valid_until = $1
-    WHERE domain = $2
-      AND valid_on <= $1
-      AND valid_until > $1
-    "#,
-  )
-  .bind(now)
-  .bind(&domain)
-  .execute(&mut **tx)
-  .await?;
-
-  // Insert an "expired" event to maintain event sourcing pattern
-  sqlx::query(
-    r#"
-    INSERT INTO domain_classification_events (domain, action, action_data, created_at)
-    VALUES ($1, 'expired'::classification_action, '{}'::jsonb, $2)
-    "#,
-  )
-  .bind(&domain)
-  .bind(now)
-  .execute(&mut **tx)
-  .await?;
-
-  Ok(result)
-}
-
-/// Reproject classifications for a specific domain from its events.
-/// Deletes existing classifications for the domain and rebuilds from latest events.
-pub async fn domain_reproject(
-  tx: &mut Transaction<'_, Postgres>,
-  domain: &str,
-  ttl_days: i64,
-) -> Result<i64, DbError> {
-  // Get all most recent "classified" events for this domain per classification_type
-  let rows = sqlx::query(
-    r#"
-    WITH latest_classified_events AS (
-        SELECT DISTINCT ON (domain, (action_data->>'classification_type'))
-            domain,
-            action_data->>'classification_type' as classification_type,
-            (action_data->>'is_matching_site')::boolean as is_matching_site,
-            (action_data->>'confidence')::real as confidence,
-            action_data->>'reasoning' as reasoning,
-            COALESCE(action_data->>'model', 'unknown') as model,
-            prompt_id,
-            created_at
-        FROM domain_classification_events
-        WHERE action = 'classified'
-          AND domain = $1
-        ORDER BY domain, (action_data->>'classification_type'), created_at DESC
-    )
-    SELECT
-        domain,
-        classification_type,
-        is_matching_site,
-        confidence,
-        reasoning,
-        model,
-        prompt_id,
-        created_at
-    FROM latest_classified_events
-    WHERE classification_type IS NOT NULL
-      AND is_matching_site IS NOT NULL
-      AND confidence IS NOT NULL
-    "#,
-  )
-  .bind(domain)
-  .fetch_all(&mut **tx)
-  .await?;
-
-  let mut count = 0i64;
-
-  // Delete existing projections for this domain
-  sqlx::query("DELETE FROM domain_classifications WHERE domain = $1")
-    .bind(domain)
-    .execute(&mut **tx)
-    .await?;
-
-  // Insert new projections from events
-  for row in rows {
-    let domain: String = row.try_get("domain")?;
-    let classification_type: String = row.try_get("classification_type")?;
-    let is_matching_site: bool = row.try_get("is_matching_site")?;
-    let confidence: f32 = row.try_get("confidence")?;
-    let reasoning: Option<String> = row.try_get("reasoning")?;
-    let model: String = row.try_get("model")?;
-    let prompt_id: Option<i32> = row.try_get("prompt_id")?;
-    let created_at: DateTime<Utc> = row.try_get("created_at")?;
-
-    let valid_on = created_at;
-    let valid_until = created_at + Duration::days(ttl_days);
-
-    let insert = ClassificationInsert {
-      domain,
-      classification_type,
-      is_matching_site,
-      confidence,
-      reasoning,
-      valid_on,
-      valid_until,
-      model,
-      prompt_id,
-    };
-
-    insert.insert_with_created_at(tx, created_at).await?;
-    count += 1;
-  }
 
   Ok(count)
 }

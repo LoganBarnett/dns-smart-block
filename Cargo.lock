@@ -852,6 +852,7 @@ dependencies = [
 name = "dns-smart-block-blocklist-server"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "atty",
  "axum 0.7.9",
  "axum-test",
@@ -862,6 +863,7 @@ dependencies = [
  "lazy_static",
  "prometheus",
  "serde",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.17",
  "tokio",

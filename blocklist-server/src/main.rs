@@ -13,6 +13,9 @@ use clap::Parser;
 use dns_smart_block_blocklist_server::{
   CLASSIFICATIONS_CSS, CLASSIFICATIONS_HTML, CLASSIFICATIONS_JS,
 };
+use dns_smart_block_common::db_models::{
+  DomainExpire, DomainRequeue, ErroredClassification,
+};
 use dns_smart_block_common::logging::LoggingArgs;
 use lazy_static::lazy_static;
 use prometheus::register_gauge_vec;
@@ -26,10 +29,11 @@ use prometheus::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 lazy_static! {
     static ref REGISTRY: Registry = Registry::new();
@@ -136,11 +140,40 @@ struct CliArgs {
   /// Address to bind the admin server to (classifications, reprojection)
   #[arg(long, env = "ADMIN_BIND_ADDRESS", default_value = "127.0.0.1:8080")]
   admin_bind_address: String,
+
+  /// NATS server URL for requeueing errored domains (optional)
+  #[arg(long, env = "NATS_URL")]
+  nats_url: Option<String>,
+
+  /// NATS subject for the domain queue
+  #[arg(long, env = "NATS_SUBJECT", default_value = "dns.domains")]
+  nats_subject: String,
+}
+
+#[derive(Clone)]
+struct NatsState {
+  client: async_nats::Client,
+  subject: String,
 }
 
 #[derive(Clone)]
 struct AppState {
   pool: PgPool,
+  nats: Option<NatsState>,
+}
+
+async fn publish_to_nats(nats: &NatsState, domain: &str) -> Result<(), String> {
+  let payload = serde_json::json!({
+    "domain": domain,
+    "timestamp": Utc::now().timestamp()
+  });
+  let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+  nats
+    .client
+    .publish(nats.subject.clone(), bytes.into())
+    .await
+    .map_err(|e| e.to_string())?;
+  Ok(())
 }
 
 #[derive(Deserialize)]
@@ -334,55 +367,66 @@ async fn get_classifications(
   Query(params): Query<ClassificationsParams>,
   headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-  match db::get_classifications(
+  let classifications = match db::get_classifications(
     &state.pool,
     params.classification_type.as_deref(),
   )
   .await
   {
-    Ok(classifications) => {
-      info!(
-        "Serving {} classifications{}",
-        classifications.len(),
-        params
-          .classification_type
-          .as_ref()
-          .map(|ct| format!(" for type '{}'", ct))
-          .unwrap_or_default()
-      );
-
-      // Check if client wants HTML.
-      let wants_html = headers
-        .get(axum::http::header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("text/html"))
-        .unwrap_or(false);
-
-      if wants_html {
-        let html = render_classifications_html(&classifications, &params);
-        (
-          StatusCode::OK,
-          [(axum::http::header::CONTENT_TYPE, "text/html")],
-          html,
-        )
-          .into_response()
-      } else {
-        (StatusCode::OK, axum::Json(classifications)).into_response()
-      }
-    }
+    Ok(c) => c,
     Err(e) => {
       error!("Database error fetching classifications: {}", e);
-      (
+      return (
         StatusCode::INTERNAL_SERVER_ERROR,
         axum::Json(Vec::<db::ClassificationDetail>::new()),
       )
-        .into_response()
+        .into_response();
     }
+  };
+
+  info!(
+    "Serving {} classifications{}",
+    classifications.len(),
+    params
+      .classification_type
+      .as_ref()
+      .map(|ct| format!(" for type '{}'", ct))
+      .unwrap_or_default()
+  );
+
+  // Check if client wants HTML.
+  let wants_html = headers
+    .get(axum::http::header::ACCEPT)
+    .and_then(|v| v.to_str().ok())
+    .map(|v| v.contains("text/html"))
+    .unwrap_or(false);
+
+  if wants_html {
+    let errored = ErroredClassification::find(
+      &state.pool,
+      params.classification_type.as_deref(),
+    )
+    .await
+    .unwrap_or_else(|e| {
+      error!("Database error fetching errored classifications: {}", e);
+      vec![]
+    });
+
+    let html = render_classifications_html(&classifications, &errored, &params);
+    (
+      StatusCode::OK,
+      [(axum::http::header::CONTENT_TYPE, "text/html")],
+      html,
+    )
+      .into_response()
+  } else {
+    (StatusCode::OK, axum::Json(classifications)).into_response()
   }
 }
 
 fn render_classifications_html(
   classifications: &[db::ClassificationDetail],
+  errored: &[ErroredClassification],
   params: &ClassificationsParams,
 ) -> String {
   let filter_info = params
@@ -421,11 +465,94 @@ fn render_classifications_html(
     })
     .collect();
 
+  // Build per-type requeue buttons from distinct types in errored list.
+  let requeue_type_buttons: String = {
+    let mut seen = HashSet::new();
+    errored
+      .iter()
+      .filter(|e| seen.insert(e.classification_type.clone()))
+      .map(|e| {
+        let type_count =
+          errored.iter().filter(|x| x.classification_type == e.classification_type).count();
+        format!(
+          r#"<button class="requeue-btn" onclick="requeueType('{}')">Requeue {} errors ({})</button>"#,
+          html_escape(&e.classification_type),
+          html_escape(&e.classification_type),
+          type_count,
+        )
+      })
+      .collect::<Vec<_>>()
+      .join("\n")
+  };
+
+  // Build admin actions section (only if there are errors).
+  let admin_actions = if errored.is_empty() {
+    String::new()
+  } else {
+    format!(
+      r#"<div class="admin-actions">
+  <button class="requeue-btn requeue-all-btn" onclick="requeueAll()">Requeue all errors ({})</button>
+  {}
+</div>"#,
+      errored.len(),
+      requeue_type_buttons,
+    )
+  };
+
+  // Build errored classifications section.
+  let errors_section = if errored.is_empty() {
+    String::new()
+  } else {
+    let error_rows: String = errored
+      .iter()
+      .map(|e| {
+        format!(
+          r#"<tr class="error-row">
+          <td>{}</td>
+          <td>{}</td>
+          <td class="reasoning">{}</td>
+          <td>{}</td>
+          <td><button class="requeue-btn" onclick="requeueDomain('{}', '{}')">Requeue</button></td>
+        </tr>"#,
+          html_escape(&e.domain),
+          html_escape(&e.classification_type),
+          html_escape(e.error_message.as_deref().unwrap_or("")),
+          e.errored_at.format("%Y-%m-%d %H:%M:%S"),
+          html_escape(&e.domain),
+          html_escape(&e.classification_type),
+        )
+      })
+      .collect();
+
+    format!(
+      r#"<h2>Errored Classifications</h2>
+<div class="count">Total: {} error(s)</div>
+<table id="errorsTable">
+  <thead>
+    <tr>
+      <th onclick="sortTable('errorsTable', 0)">Domain</th>
+      <th onclick="sortTable('errorsTable', 1)">Type</th>
+      <th onclick="sortTable('errorsTable', 2)">Error</th>
+      <th onclick="sortTable('errorsTable', 3)">Errored At</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {}
+  </tbody>
+</table>"#,
+      errored.len(),
+      error_rows,
+    )
+  };
+
   // Perform substitutions on the compile-time embedded template
   CLASSIFICATIONS_HTML
     .replace("{{FILTER_INFO}}", &filter_info)
     .replace("{{COUNT}}", &classifications.len().to_string())
     .replace("{{ROWS}}", &rows)
+    .replace("{{ADMIN_ACTIONS}}", &admin_actions)
+    .replace("{{ERRORS_SECTION}}", &errors_section)
 }
 
 fn html_escape(s: &str) -> String {
@@ -496,7 +623,11 @@ async fn expire(
     }
   };
 
-  let expire_result = db::domain_expire(&mut tx, params.domain.clone()).await;
+  let expire_result = DomainExpire {
+    domain: params.domain.clone(),
+  }
+  .expire(&mut tx)
+  .await;
 
   if let Err(e) = tx.commit().await {
     error!("Failed to commit transaction: {}", e);
@@ -524,6 +655,316 @@ async fn expire(
   }
 }
 
+#[derive(Deserialize)]
+struct RequeueParams {
+  domain: String,
+  classification_type: String,
+}
+
+async fn requeue(
+  State(state): State<AppState>,
+  Query(params): Query<RequeueParams>,
+) -> impl IntoResponse {
+  let nats = match &state.nats {
+    Some(n) => n.clone(),
+    None => {
+      return (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "NATS not configured. Set --nats-url to enable requeueing.\n"
+          .to_string(),
+      );
+    }
+  };
+
+  info!(
+    "Requeueing domain '{}' for type '{}'",
+    params.domain, params.classification_type
+  );
+
+  // Verify this domain+type is actually in error state.
+  let errored = match ErroredClassification::find(
+    &state.pool,
+    Some(&params.classification_type),
+  )
+  .await
+  {
+    Ok(e) => e,
+    Err(e) => {
+      error!("DB error fetching errored classifications: {}", e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Database error: {}\n", e),
+      );
+    }
+  };
+
+  if !errored.iter().any(|e| e.domain == params.domain) {
+    return (
+      StatusCode::NOT_FOUND,
+      format!(
+        "No error found for domain '{}' with type '{}'\n",
+        params.domain, params.classification_type
+      ),
+    );
+  }
+
+  let mut tx = match state.pool.begin().await {
+    Ok(tx) => tx,
+    Err(e) => {
+      error!("Failed to begin transaction: {}", e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Failed to begin transaction: {}\n", e),
+      );
+    }
+  };
+
+  if let Err(e) = (DomainRequeue {
+    domain: params.domain.clone(),
+  })
+  .requeue(&mut tx)
+  .await
+  {
+    error!("Failed to insert requeue event: {}", e);
+    return (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Database error: {}\n", e),
+    );
+  }
+
+  if let Err(e) = tx.commit().await {
+    error!("Failed to commit transaction: {}", e);
+    return (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Failed to commit transaction: {}\n", e),
+    );
+  }
+
+  if let Err(e) = publish_to_nats(&nats, &params.domain).await {
+    error!("Failed to publish domain to NATS: {}", e);
+    return (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("NATS error: {}\n", e),
+    );
+  }
+
+  info!(
+    "Requeued domain '{}' for type '{}'",
+    params.domain, params.classification_type
+  );
+  (
+    StatusCode::OK,
+    format!(
+      "Requeued domain '{}' for type '{}'\n",
+      params.domain, params.classification_type
+    ),
+  )
+}
+
+#[derive(Deserialize)]
+struct RequeueTypeParams {
+  classification_type: String,
+}
+
+async fn requeue_type(
+  State(state): State<AppState>,
+  Query(params): Query<RequeueTypeParams>,
+) -> impl IntoResponse {
+  let nats = match &state.nats {
+    Some(n) => n.clone(),
+    None => {
+      return (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "NATS not configured. Set --nats-url to enable requeueing.\n"
+          .to_string(),
+      );
+    }
+  };
+
+  info!(
+    "Requeueing all errored domains for type '{}'",
+    params.classification_type
+  );
+
+  let errored = match ErroredClassification::find(
+    &state.pool,
+    Some(&params.classification_type),
+  )
+  .await
+  {
+    Ok(e) => e,
+    Err(e) => {
+      error!("DB error fetching errored classifications: {}", e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Database error: {}\n", e),
+      );
+    }
+  };
+
+  if errored.is_empty() {
+    return (
+      StatusCode::OK,
+      format!(
+        "No errors found for type '{}'\n",
+        params.classification_type
+      ),
+    );
+  }
+
+  // Deduplicate domains before inserting events / publishing.
+  let domains: Vec<String> = {
+    let mut seen = HashSet::new();
+    errored
+      .iter()
+      .filter(|e| seen.insert(e.domain.clone()))
+      .map(|e| e.domain.clone())
+      .collect()
+  };
+
+  let mut tx = match state.pool.begin().await {
+    Ok(tx) => tx,
+    Err(e) => {
+      error!("Failed to begin transaction: {}", e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Failed to begin transaction: {}\n", e),
+      );
+    }
+  };
+
+  for domain in &domains {
+    if let Err(e) = (DomainRequeue {
+      domain: domain.clone(),
+    })
+    .requeue(&mut tx)
+    .await
+    {
+      error!("Failed to insert requeue event for '{}': {}", domain, e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Database error: {}\n", e),
+      );
+    }
+  }
+
+  if let Err(e) = tx.commit().await {
+    error!("Failed to commit transaction: {}", e);
+    return (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Failed to commit transaction: {}\n", e),
+    );
+  }
+
+  let mut published = 0usize;
+  for domain in &domains {
+    match publish_to_nats(&nats, domain).await {
+      Ok(_) => published += 1,
+      Err(e) => warn!("Failed to publish '{}' to NATS: {}", domain, e),
+    }
+  }
+
+  info!(
+    "Requeued {} domain(s) for type '{}'",
+    published, params.classification_type
+  );
+  (
+    StatusCode::OK,
+    format!(
+      "Requeued {} domain(s) for type '{}'\n",
+      published, params.classification_type
+    ),
+  )
+}
+
+async fn requeue_all(State(state): State<AppState>) -> impl IntoResponse {
+  let nats = match &state.nats {
+    Some(n) => n.clone(),
+    None => {
+      return (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "NATS not configured. Set --nats-url to enable requeueing.\n"
+          .to_string(),
+      );
+    }
+  };
+
+  info!("Requeueing all errored domains");
+
+  let errored = match ErroredClassification::find(&state.pool, None).await {
+    Ok(e) => e,
+    Err(e) => {
+      error!("DB error fetching errored classifications: {}", e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Database error: {}\n", e),
+      );
+    }
+  };
+
+  if errored.is_empty() {
+    return (StatusCode::OK, "No errors found\n".to_string());
+  }
+
+  // Deduplicate domains before inserting events / publishing.
+  let domains: Vec<String> = {
+    let mut seen = HashSet::new();
+    errored
+      .iter()
+      .filter(|e| seen.insert(e.domain.clone()))
+      .map(|e| e.domain.clone())
+      .collect()
+  };
+
+  let mut tx = match state.pool.begin().await {
+    Ok(tx) => tx,
+    Err(e) => {
+      error!("Failed to begin transaction: {}", e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Failed to begin transaction: {}\n", e),
+      );
+    }
+  };
+
+  for domain in &domains {
+    if let Err(e) = (DomainRequeue {
+      domain: domain.clone(),
+    })
+    .requeue(&mut tx)
+    .await
+    {
+      error!("Failed to insert requeue event for '{}': {}", domain, e);
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Database error: {}\n", e),
+      );
+    }
+  }
+
+  if let Err(e) = tx.commit().await {
+    error!("Failed to commit transaction: {}", e);
+    return (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      format!("Failed to commit transaction: {}\n", e),
+    );
+  }
+
+  let mut published = 0usize;
+  for domain in &domains {
+    match publish_to_nats(&nats, domain).await {
+      Ok(_) => published += 1,
+      Err(e) => warn!("Failed to publish '{}' to NATS: {}", domain, e),
+    }
+  }
+
+  info!("Requeued {} domain(s)", published);
+  (
+    StatusCode::OK,
+    format!("Requeued {} domain(s)\n", published),
+  )
+}
+
 async fn static_css() -> impl IntoResponse {
   ([(header::CONTENT_TYPE, "text/css")], CLASSIFICATIONS_CSS)
 }
@@ -540,6 +981,9 @@ fn create_admin_router(state: AppState) -> Router {
     .route("/classifications", get(get_classifications))
     .route("/reprojection", post(reprojection))
     .route("/expire", post(expire))
+    .route("/requeue", post(requeue))
+    .route("/requeue/type", post(requeue_type))
+    .route("/requeue/all", post(requeue_all))
     .route("/static/classifications.css", get(static_css))
     .route("/static/classifications.js", get(static_js))
     .layer(TraceLayer::new_for_http())
@@ -595,8 +1039,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let pool = PgPool::connect(&database_url).await?;
   info!("Connected to PostgreSQL successfully");
 
+  // Connect to NATS if configured (used for requeueing errored domains).
+  let nats = if let Some(ref nats_url) = args.nats_url {
+    info!("Connecting to NATS at {}", nats_url);
+    match async_nats::connect(nats_url).await {
+      Ok(client) => {
+        info!("Connected to NATS successfully");
+        Some(NatsState {
+          client,
+          subject: args.nats_subject.clone(),
+        })
+      }
+      Err(e) => {
+        error!(
+          "Failed to connect to NATS: {}. Requeue functionality will be disabled.",
+          e
+        );
+        None
+      }
+    }
+  } else {
+    info!("No NATS URL configured. Requeue functionality will be disabled.");
+    None
+  };
+
   // Build app state
-  let state = AppState { pool };
+  let state = AppState { pool, nats };
 
   // Build public router (network accessible)
   let public_app = Router::new()

@@ -20,6 +20,8 @@ url = "*"
 thiserror = "*"
 prometheus = "*"
 lazy_static = "1.4"
+async-nats = "0.33"
+serde_json = "*"
 
 [dev-dependencies]
 axum-test = "*"

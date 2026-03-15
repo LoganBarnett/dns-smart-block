@@ -1,13 +1,15 @@
-let sortDirection = {};
+let sortDirections = {};
 
-function sortTable(columnIndex) {
-  const table = document.getElementById('classificationsTable');
+function sortTable(tableId, columnIndex) {
+  const table = document.getElementById(tableId);
   const tbody = table.querySelector('tbody');
   const rows = Array.from(tbody.querySelectorAll('tr'));
 
-  const currentDirection = sortDirection[columnIndex] || 'asc';
+  const key = tableId + ':' + columnIndex;
+  const currentDirection = sortDirections[key] || 'asc';
   const newDirection = currentDirection === 'asc' ? 'desc' : 'asc';
-  sortDirection = { [columnIndex]: newDirection };
+  sortDirections = {};
+  sortDirections[key] = newDirection;
 
   rows.sort((a, b) => {
     let aValue = a.cells[columnIndex].textContent.trim();
@@ -63,7 +65,6 @@ async function expireDomain(domain) {
     if (response.ok) {
       const result = await response.text();
       alert(`Success: ${result}`);
-      // Reload the page to show updated data
       window.location.reload();
     } else {
       const error = await response.text();
@@ -75,5 +76,86 @@ async function expireDomain(domain) {
     alert(`Failed to expire domain: ${error.message}`);
     button.disabled = false;
     button.textContent = 'Expire';
+  }
+}
+
+async function requeueDomain(domain, classificationType) {
+  const button = event.target;
+  button.disabled = true;
+  button.textContent = 'Requeueing...';
+
+  try {
+    const response = await fetch(
+      `/requeue?domain=${encodeURIComponent(domain)}&classification_type=${encodeURIComponent(classificationType)}`,
+      { method: 'POST' }
+    );
+
+    if (response.ok) {
+      const result = await response.text();
+      alert(`Success: ${result}`);
+      window.location.reload();
+    } else {
+      const error = await response.text();
+      alert(`Error: ${error}`);
+      button.disabled = false;
+      button.textContent = 'Requeue';
+    }
+  } catch (error) {
+    alert(`Failed to requeue domain: ${error.message}`);
+    button.disabled = false;
+    button.textContent = 'Requeue';
+  }
+}
+
+async function requeueType(classificationType) {
+  const button = event.target;
+  button.disabled = true;
+  button.textContent = 'Requeueing...';
+
+  try {
+    const response = await fetch(
+      `/requeue/type?classification_type=${encodeURIComponent(classificationType)}`,
+      { method: 'POST' }
+    );
+
+    if (response.ok) {
+      const result = await response.text();
+      alert(`Success: ${result}`);
+      window.location.reload();
+    } else {
+      const error = await response.text();
+      alert(`Error: ${error}`);
+      button.disabled = false;
+      button.textContent = `Requeue ${classificationType} errors`;
+    }
+  } catch (error) {
+    alert(`Failed to requeue: ${error.message}`);
+    button.disabled = false;
+    button.textContent = `Requeue ${classificationType} errors`;
+  }
+}
+
+async function requeueAll() {
+  const button = event.target;
+  button.disabled = true;
+  button.textContent = 'Requeueing...';
+
+  try {
+    const response = await fetch('/requeue/all', { method: 'POST' });
+
+    if (response.ok) {
+      const result = await response.text();
+      alert(`Success: ${result}`);
+      window.location.reload();
+    } else {
+      const error = await response.text();
+      alert(`Error: ${error}`);
+      button.disabled = false;
+      button.textContent = 'Requeue all errors';
+    }
+  } catch (error) {
+    alert(`Failed to requeue all: ${error.message}`);
+    button.disabled = false;
+    button.textContent = 'Requeue all errors';
   }
 }

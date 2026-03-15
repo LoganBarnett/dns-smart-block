@@ -77,3 +77,50 @@ tr:hover {
   background: #ccc;
   cursor: not-allowed;
 }
+
+.requeue-btn {
+  background: #FF9800;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.requeue-btn:hover {
+  background: #e68900;
+}
+
+.requeue-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.requeue-all-btn {
+  background: #f44336;
+}
+
+.requeue-all-btn:hover {
+  background: #da190b;
+}
+
+.admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.error-row {
+  background: #fff3e0;
+}
+
+.error-row:hover {
+  background: #ffe0b2;
+}
+
+h2 {
+  color: #333;
+  margin-top: 32px;
+}

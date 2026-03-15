@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgQueryResult, FromRow, Postgres, Transaction};
+use sqlx::{FromRow, Postgres, Transaction, postgres::PgQueryResult};
 
 /// Input for inserting a domain classification projection.
 /// Contains only the fields we provide (not auto-generated like created_at).
@@ -242,22 +242,156 @@ pub struct DomainExpire {
 }
 
 impl DomainExpire {
-  /// Expire this domain by setting valid_until to NOW() for all non-expired classifications.
-  /// Domain classification events are immutable and are not modified.
+  /// Expire all currently valid classifications for this domain and record
+  /// an `expired` event. Both the projection update and event insertion
+  /// share the same timestamp so the event log stays consistent.
   pub async fn expire(
     &self,
     tx: &mut Transaction<'_, Postgres>,
   ) -> Result<PgQueryResult, sqlx::Error> {
-    sqlx::query(
+    let now = Utc::now();
+
+    let result = sqlx::query(
       r#"
       UPDATE domain_classifications
-      SET valid_until = NOW()
-      WHERE domain = $1 AND valid_until > NOW()
+      SET valid_until = $1
+      WHERE domain = $2
+        AND valid_on <= $1
+        AND valid_until > $1
+      "#,
+    )
+    .bind(now)
+    .bind(&self.domain)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classification_events (domain, action, action_data, created_at)
+      VALUES ($1, 'expired'::classification_action, '{}'::jsonb, $2)
       "#,
     )
     .bind(&self.domain)
+    .bind(now)
     .execute(&mut **tx)
-    .await
+    .await?;
+
+    Ok(result)
+  }
+}
+
+/// Marks a domain for re-classification by inserting a `queued` event.
+///
+/// Inserting this event signals the log-processor not to double-queue the
+/// domain while it is already in-flight via NATS, and gives the event log
+/// an audit trail for the admin requeue action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainRequeue {
+  pub domain: String,
+}
+
+impl DomainRequeue {
+  /// Insert a `queued` event for the domain.
+  pub async fn requeue(
+    &self,
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<(), sqlx::Error> {
+    let now = Utc::now();
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classification_events (domain, action, action_data, created_at)
+      VALUES ($1, 'queued'::classification_action, '{}'::jsonb, $2)
+      "#,
+    )
+    .bind(&self.domain)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+  }
+}
+
+/// A (domain, classification_type) pair whose most recent type-specific event
+/// is an `error`. Used by the admin UI to surface and requeue failed
+/// classifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErroredClassification {
+  pub domain: String,
+  pub classification_type: String,
+  pub error_message: Option<String>,
+  pub errored_at: DateTime<Utc>,
+}
+
+impl ErroredClassification {
+  /// Return all errored (domain, classification_type) pairs, optionally
+  /// filtered to a single classification type.
+  ///
+  /// A pair is "errored" when the most recent event that carries a
+  /// `classification_type` field in its `action_data` is an `error` event.
+  pub async fn find(
+    pool: &sqlx::PgPool,
+    classification_type: Option<&str>,
+  ) -> Result<Vec<Self>, sqlx::Error> {
+    let rows = if let Some(ct) = classification_type {
+      sqlx::query(
+        r#"
+        WITH latest_type_events AS (
+            SELECT DISTINCT ON (domain, action_data->>'classification_type')
+                domain,
+                action_data->>'classification_type' AS classification_type,
+                action::text AS action,
+                action_data->>'error' AS error_message,
+                created_at
+            FROM domain_classification_events
+            WHERE action_data->>'classification_type' IS NOT NULL
+              AND action_data->>'classification_type' = $1
+            ORDER BY domain, action_data->>'classification_type', created_at DESC
+        )
+        SELECT domain, classification_type, error_message, created_at
+        FROM latest_type_events
+        WHERE action = 'error'
+        ORDER BY created_at DESC
+        "#,
+      )
+      .bind(ct)
+      .fetch_all(pool)
+      .await?
+    } else {
+      sqlx::query(
+        r#"
+        WITH latest_type_events AS (
+            SELECT DISTINCT ON (domain, action_data->>'classification_type')
+                domain,
+                action_data->>'classification_type' AS classification_type,
+                action::text AS action,
+                action_data->>'error' AS error_message,
+                created_at
+            FROM domain_classification_events
+            WHERE action_data->>'classification_type' IS NOT NULL
+            ORDER BY domain, action_data->>'classification_type', created_at DESC
+        )
+        SELECT domain, classification_type, error_message, created_at
+        FROM latest_type_events
+        WHERE action = 'error'
+        ORDER BY created_at DESC
+        "#,
+      )
+      .fetch_all(pool)
+      .await?
+    };
+
+    rows
+      .into_iter()
+      .map(|row| {
+        use sqlx::Row;
+        Ok(Self {
+          domain: row.try_get("domain")?,
+          classification_type: row.try_get("classification_type")?,
+          error_message: row.try_get("error_message")?,
+          errored_at: row.try_get("created_at")?,
+        })
+      })
+      .collect()
   }
 }
 /// Full domain record as read from the database.

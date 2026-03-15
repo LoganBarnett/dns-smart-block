@@ -1,0 +1,250 @@
+#+TITLE: Contributing to DNS Smart Block
+#+OPTIONS: toc:3 num:t
+
+* Overview
+
+DNS Smart Block is a Rust workspace that classifies DNS domains with LLMs and
+serves the results as blocklists.  The codebase is structured as five binary
+crates and one shared library crate.
+
+* Workspace structure
+
+#+begin_src
+dns-smart-block/
+├── common/           # Shared domain models, DB operations, utilities
+├── classifier/       # LLM classification engine (binary, called as a subprocess)
+├── log-processor/    # Reads DNS query logs and publishes new domains to NATS
+├── queue-processor/  # Consumes domains from NATS and runs classifiers
+├── blocklist-server/ # Serves blocklists (public) and admin UI (localhost)
+└── migrations/       # PostgreSQL migrations (sqlx)
+#+end_src
+
+** Component responsibilities
+
+| Crate              | Role                                                        |
+|--------------------+-------------------------------------------------------------|
+| ~common~           | Shared data models and DB operations used by multiple crates |
+| ~classifier~       | Fetches a domain's content and asks an Ollama model to classify it |
+| ~log-processor~    | Tails DNS logs, deduplicates domains, publishes to NATS JetStream |
+| ~queue-processor~  | Pulls from NATS, invokes ~classifier~ for each pending domain |
+| ~blocklist-server~ | Public ~GET /blocklist~ API; admin ~POST /expire~, ~POST /requeue~ |
+
+** Data flow
+
+#+begin_src
+DNS log → log-processor → NATS JetStream (dns.domains)
+                                ↓
+                        queue-processor
+                                ↓
+                          classifier (subprocess)
+                                ↓
+                        PostgreSQL (events + projections)
+                                ↓
+                        blocklist-server → /blocklist
+#+end_src
+
+* Architecture principles
+
+** Event sourcing
+
+All significant domain-lifecycle transitions are recorded as immutable rows in
+~domain_classification_events~.  The ~domain_classifications~ table is a
+*projection* derived from those events and can be rebuilt at any time via the
+~/reprojection~ admin endpoint.
+
+The ~classification_action~ PostgreSQL enum defines the set of valid actions:
+
+| Action       | Meaning                                           |
+|--------------+---------------------------------------------------|
+| ~queued~     | Domain was published to NATS for processing       |
+| ~classifying~| A classifier subprocess has started               |
+| ~classified~ | A classifier produced a result                    |
+| ~error~      | A classifier attempt failed                       |
+| ~expired~    | An admin manually expired the classifications     |
+
+When adding new lifecycle transitions, prefer adding a new action value over
+encoding state in ~action_data~.
+
+** Projection vs. events
+
+- ~domain_classification_events~ is append-only and is the source of truth.
+- ~domain_classifications~ holds the current valid projection (indexed,
+  queried by the public blocklist endpoint).
+- Never update or delete from ~domain_classification_events~.
+
+** Classifier state machine
+
+The ~queue-processor~ determines what to do with a domain by calling
+~get_classifier_states~.  For each configured classification type it returns
+one of:
+
+| State     | Meaning                                        | Action taken        |
+|-----------+------------------------------------------------+---------------------|
+| ~Current~ | Valid classification exists within TTL         | Skip                |
+| ~Expired~ | Classification exists but TTL has passed       | Re-classify         |
+| ~Error~   | Most recent type-specific event is ~error~     | Re-classify         |
+| ~Missing~ | No classification for this type yet            | Classify            |
+
+* The ~common~ crate
+
+** What belongs in ~common~
+
+~common/src/db_models.rs~ is the *repository layer* for the domain model.
+Put something there when:
+
+- It is a first-class domain concept (a classification, an event, a prompt).
+- The struct or function is used by more than one crate, *or* is a fundamental
+  domain operation (insert, expire, requeue) that should be canonical.
+- It maps directly to a database table or a meaningful projection of one.
+
+** What stays in a service crate
+
+Keep code in a service's own ~db.rs~ when:
+
+- It is specific to that service's presentation or business logic (e.g.,
+  Prometheus metric aggregations, admin-UI view models).
+- It is a complex read query that assembles a response shape unique to that
+  endpoint.
+
+As a rule of thumb: if another service or a CLI tool might plausibly need it,
+it belongs in ~common~.
+
+** Pattern: struct + impl with DB methods
+
+Follow the existing convention.  Each entity has:
+
+1. An *insert/upsert input type* (e.g., ~ClassificationInsert~, ~DomainUpsert~)
+   with an ~insert()~ / ~upsert()~ method that takes ~&mut Transaction~.
+2. A *read type* (e.g., ~Classification~, ~ClassificationEvent~) derived from
+   ~sqlx::FromRow~ where useful, with query methods as associated functions.
+3. An *action type* for admin mutations (e.g., ~DomainExpire~, ~DomainRequeue~)
+   with a method that takes ~&mut Transaction~ and performs both the projection
+   update and the corresponding event insertion.
+
+#+begin_src rust
+// Example: adding a new domain operation
+pub struct DomainFreeze {
+    pub domain: String,
+}
+
+impl DomainFreeze {
+    pub async fn freeze(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> Result<(), sqlx::Error> {
+        // 1. Mutate the projection table.
+        sqlx::query("UPDATE domain_classifications SET ...")
+            .bind(&self.domain)
+            .execute(&mut **tx)
+            .await?;
+
+        // 2. Record the event (always, to maintain the event log).
+        sqlx::query(
+            "INSERT INTO domain_classification_events \
+             (domain, action, action_data, created_at) \
+             VALUES ($1, 'frozen'::classification_action, '{}'::jsonb, NOW())",
+        )
+        .bind(&self.domain)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
+    }
+}
+#+end_src
+
+** Current types in ~db_models.rs~
+
+| Type                      | Purpose                                               |
+|---------------------------+-------------------------------------------------------|
+| ~ClassificationInsert~    | Insert a new projection row                           |
+| ~Classification~          | Read a classification; find blocked domains           |
+| ~ClassificationEventInsert~ | Insert an event row                                 |
+| ~ClassificationEvent~     | Read a full event record                              |
+| ~PromptInsert~            | Upsert a prompt, returning its ID                     |
+| ~Prompt~                  | Read a prompt record                                  |
+| ~DomainUpsert~            | Upsert a domain into the ~domains~ table              |
+| ~Domain~                  | Read a domain record                                  |
+| ~DomainExpire~            | Expire all valid classifications + insert ~expired~ event |
+| ~DomainRequeue~           | Insert a ~queued~ event to trigger re-classification  |
+| ~ErroredClassification~   | Query (domain, type) pairs whose latest event is ~error~ |
+
+* Adding new features
+
+** New domain operation (e.g., a new admin action)
+
+1. Add any required ~classification_action~ enum values in a new migration
+   under ~migrations/~.
+2. Add the action type to ~common/src/db_models.rs~ following the struct + impl
+   pattern above.
+3. Add the API handler and route in the appropriate service crate.
+4. Add a DB helper in the service's ~db.rs~ only if the query is
+   service-specific and does not belong in ~common~.
+
+** New admin endpoint in ~blocklist-server~
+
+1. Define a ~#[derive(Deserialize)]~ params struct.
+2. Write an ~async fn handler(State, Query) -> impl IntoResponse~ function.
+3. Register the route in ~create_admin_router~.
+4. Add the corresponding button/function in
+   ~blocklist-server/static/classifications.js~ and update
+   ~blocklist-server/templates/classifications.html~ if a UI change is needed.
+
+** New classification type
+
+Classification types are configuration-driven, not code-driven.  Add a new
+entry to the TOML config file consumed by ~queue-processor~.  No code changes
+are required.
+
+** Migrations
+
+- Place new migration files in ~migrations/~ using the naming convention
+  ~YYYYMMDDHHMMSS_description.sql~.
+- Migrations are run automatically on startup by ~queue-processor~ (and in
+  tests by ~common::test_db::TestDb~).
+- Never modify an existing migration.  Add a new one.
+
+* Testing
+
+** Unit tests
+
+Run all tests across the workspace:
+
+#+begin_src sh
+cargo test --workspace
+#+end_src
+
+Tests that require a live PostgreSQL instance are marked ~#[ignore]~ and can be
+run with:
+
+#+begin_src sh
+cargo test --workspace -- --include-ignored
+#+end_src
+
+** ~TestDb~
+
+~common::test_db::TestDb~ manages an ephemeral PostgreSQL cluster for
+integration tests.  It calls ~initdb~ and ~postgres~ automatically if no
+cluster is running on port 15432.
+
+#+begin_src rust
+#[tokio::test]
+async fn my_db_test() {
+    let test_db = dns_smart_block_common::test_db::TestDb::new()
+        .expect("failed to start test db");
+    let pool = test_db.pool().await.expect("failed to get pool");
+    // ... use pool ...
+}
+#+end_src
+
+The data directory lives at ~test-postgres-data/~ in the repository root (it
+is gitignored).
+
+* Code style
+
+- Follow standard ~rustfmt~ formatting (~cargo fmt --all~).
+- Prefer ~thiserror~ for error types; propagate ~sqlx::Error~ directly rather
+  than wrapping it unless the service needs to add context.
+- Log with ~tracing~: use ~info!~ for normal flow, ~warn!~ for recoverable
+  issues, ~error!~ for failures that affect correctness.
+- Keep service-specific concerns out of ~common~.
