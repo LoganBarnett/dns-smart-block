@@ -1,4 +1,4 @@
-#+title:     Vibe Coding
+#+title:     LLMs
 #+author:    Logan Barnett
 #+email:     logustus@gmail.com
 #+date:      <2025-11-17 Mon>
@@ -376,6 +376,17 @@ async fn main() -> anyhow::Result<()> {
   }
   Ok(())
 }
+#+END_SRC
+
+** Workflow
+
+*** Build environment
+
+Always use ~nix develop~ to get access to ~cargo~ and other build tools rather
+than pulling them from global ~nixpkgs~:
+
+#+BEGIN_SRC bash
+cd /path/to/dns-smart-block && nix develop --command cargo build
 #+END_SRC
 
 ** Done
