@@ -1,4 +1,6 @@
-use dns_smart_block_queue_processor::db::{insert_event, update_projections};
+use dns_smart_block_queue_processor::db::{
+    get_classifier_states, insert_event, update_projections, ClassifierState,
+};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -407,4 +409,250 @@ async fn test_upsert_domain_updates_timestamp() {
     .expect("Failed to count classifications");
 
     assert_eq!(classification_count, 2, "Should have 2 classifications");
+}
+
+#[tokio::test]
+#[ignore] // Requires DATABASE_URL
+async fn test_get_classifier_states_all_missing() {
+    let pool = setup_test_db().await;
+
+    let domain = "new-domain.com";
+    let classification_types = vec![
+        "gaming".to_string(),
+        "video-streaming".to_string(),
+    ];
+
+    let states = get_classifier_states(&pool, domain, &classification_types)
+        .await
+        .expect("Failed to get classifier states");
+
+    assert_eq!(states.len(), 2);
+    assert_eq!(states[0].0, "gaming");
+    assert_eq!(states[0].1, ClassifierState::Missing);
+    assert_eq!(states[1].0, "video-streaming");
+    assert_eq!(states[1].1, ClassifierState::Missing);
+}
+
+#[tokio::test]
+#[ignore] // Requires DATABASE_URL
+async fn test_get_classifier_states_current() {
+    let pool = setup_test_db().await;
+
+    let domain = "current-domain.com";
+    let classification_types = vec!["gaming".to_string()];
+
+    // Create a current classification (valid for 10 days).
+    update_projections(
+        &pool,
+        domain,
+        "gaming",
+        0.9,
+        "llama2",
+        "test prompt",
+        "sha256:test",
+        10,
+    )
+    .await
+    .expect("Failed to update projections");
+
+    let states = get_classifier_states(&pool, domain, &classification_types)
+        .await
+        .expect("Failed to get classifier states");
+
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].0, "gaming");
+    assert_eq!(states[0].1, ClassifierState::Current);
+}
+
+#[tokio::test]
+#[ignore] // Requires DATABASE_URL
+async fn test_get_classifier_states_expired() {
+    let pool = setup_test_db().await;
+
+    let domain = "expired-domain.com";
+    let classification_types = vec!["gaming".to_string()];
+
+    // Manually insert an expired classification.
+    // First create the prompt.
+    let prompt_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO prompts (content, hash, created_at)
+        VALUES ($1, $2, NOW())
+        RETURNING id
+        "#,
+    )
+    .bind("test prompt")
+    .bind("sha256:expired")
+    .fetch_one(&pool)
+    .await
+    .expect("Failed to insert prompt");
+
+    // Insert domain.
+    sqlx::query(
+        r#"
+        INSERT INTO domains (domain, last_updated)
+        VALUES ($1, NOW())
+        "#,
+    )
+    .bind(domain)
+    .execute(&pool)
+    .await
+    .expect("Failed to insert domain");
+
+    // Insert expired classification (valid_until in the past).
+    sqlx::query(
+        r#"
+        INSERT INTO domain_classifications
+        (domain, classification_type, confidence, valid_on, valid_until, model, prompt_id, created_at)
+        VALUES ($1, $2, $3, NOW() - INTERVAL '20 days', NOW() - INTERVAL '10 days', $4, $5, NOW() - INTERVAL '20 days')
+        "#,
+    )
+    .bind(domain)
+    .bind("gaming")
+    .bind(0.9_f32)
+    .bind("llama2")
+    .bind(prompt_id)
+    .execute(&pool)
+    .await
+    .expect("Failed to insert expired classification");
+
+    let states = get_classifier_states(&pool, domain, &classification_types)
+        .await
+        .expect("Failed to get classifier states");
+
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].0, "gaming");
+    assert_eq!(states[0].1, ClassifierState::Expired);
+}
+
+#[tokio::test]
+#[ignore] // Requires DATABASE_URL
+async fn test_get_classifier_states_error() {
+    let pool = setup_test_db().await;
+
+    let domain = "error-domain.com";
+    let classification_types = vec!["gaming".to_string()];
+
+    // Insert an error event for this classification type.
+    insert_event(
+        &pool,
+        domain,
+        "error",
+        json!({
+            "classification_type": "gaming",
+            "error": "Test error"
+        }),
+    )
+    .await
+    .expect("Failed to insert error event");
+
+    let states = get_classifier_states(&pool, domain, &classification_types)
+        .await
+        .expect("Failed to get classifier states");
+
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].0, "gaming");
+    assert_eq!(states[0].1, ClassifierState::Error);
+}
+
+#[tokio::test]
+#[ignore] // Requires DATABASE_URL
+async fn test_get_classifier_states_mixed() {
+    let pool = setup_test_db().await;
+
+    let domain = "mixed-domain.com";
+    let classification_types = vec![
+        "gaming".to_string(),
+        "video-streaming".to_string(),
+        "social-media".to_string(),
+        "news".to_string(),
+    ];
+
+    // gaming: Current (valid classification).
+    update_projections(
+        &pool,
+        domain,
+        "gaming",
+        0.9,
+        "llama2",
+        "gaming prompt",
+        "sha256:gaming",
+        10,
+    )
+    .await
+    .expect("Failed to update gaming classification");
+
+    // video-streaming: Error (no classification, error event).
+    insert_event(
+        &pool,
+        domain,
+        "error",
+        json!({
+            "classification_type": "video-streaming",
+            "error": "Timeout"
+        }),
+    )
+    .await
+    .expect("Failed to insert video-streaming error");
+
+    // social-media: Expired (create expired classification).
+    let prompt_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO prompts (content, hash, created_at)
+        VALUES ($1, $2, NOW())
+        RETURNING id
+        "#,
+    )
+    .bind("social prompt")
+    .bind("sha256:social")
+    .fetch_one(&pool)
+    .await
+    .expect("Failed to insert prompt");
+
+    sqlx::query(
+        r#"
+        INSERT INTO domains (domain, last_updated)
+        VALUES ($1, NOW())
+        ON CONFLICT (domain) DO NOTHING
+        "#,
+    )
+    .bind(domain)
+    .execute(&pool)
+    .await
+    .expect("Failed to ensure domain exists");
+
+    sqlx::query(
+        r#"
+        INSERT INTO domain_classifications
+        (domain, classification_type, confidence, valid_on, valid_until, model, prompt_id, created_at)
+        VALUES ($1, $2, $3, NOW() - INTERVAL '20 days', NOW() - INTERVAL '5 days', $4, $5, NOW() - INTERVAL '20 days')
+        "#,
+    )
+    .bind(domain)
+    .bind("social-media")
+    .bind(0.85_f32)
+    .bind("llama2")
+    .bind(prompt_id)
+    .execute(&pool)
+    .await
+    .expect("Failed to insert expired social-media classification");
+
+    // news: Missing (no classification, no events).
+
+    let states = get_classifier_states(&pool, domain, &classification_types)
+        .await
+        .expect("Failed to get classifier states");
+
+    assert_eq!(states.len(), 4);
+
+    // Find each state.
+    let gaming_state = states.iter().find(|(name, _)| name == "gaming").unwrap();
+    let video_state = states.iter().find(|(name, _)| name == "video-streaming").unwrap();
+    let social_state = states.iter().find(|(name, _)| name == "social-media").unwrap();
+    let news_state = states.iter().find(|(name, _)| name == "news").unwrap();
+
+    assert_eq!(gaming_state.1, ClassifierState::Current);
+    assert_eq!(video_state.1, ClassifierState::Error);
+    assert_eq!(social_state.1, ClassifierState::Expired);
+    assert_eq!(news_state.1, ClassifierState::Missing);
 }
