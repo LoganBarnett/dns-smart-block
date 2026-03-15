@@ -8,3 +8,6 @@
 
 # Ignore Cargo generated artifacts.
 target/
+
+# Ignore test PostgreSQL data directory.
+test-postgres-data/

@@ -678,15 +678,28 @@ mod tests {
   }
 
   #[tokio::test]
-  #[ignore] // Requires DATABASE_URL
   async fn test_rebuild_projections_from_events() {
-    let pool = setup_test_db().await;
+    let test_db = dns_smart_block_common::test_db::TestDb::new()
+      .expect("Failed to setup test database");
+    let pool = test_db.pool().await.expect("Failed to get pool");
 
-    // Clean events table
+    // Clean up test data (in correct order for foreign key constraints)
     sqlx::query("DELETE FROM domain_classification_events")
       .execute(&pool)
       .await
       .expect("Failed to clean events");
+    sqlx::query("DELETE FROM domain_classifications")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean classifications");
+    sqlx::query("DELETE FROM domains")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean domains");
+    sqlx::query("DELETE FROM prompts")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean prompts");
 
     // Insert test prompts
     sqlx::query(

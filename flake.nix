@@ -38,6 +38,7 @@
       pkgs.cargo-sweep
       pkgs.pkg-config
       pkgs.openssl
+      pkgs.postgresql
     ];
   in {
 
