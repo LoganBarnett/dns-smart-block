@@ -1,6 +1,7 @@
-use dns_smart_block_queue_processor::db::{
-  get_classifier_states, insert_event, update_projections, ClassifierState,
+use dns_smart_block_common::db_models::{
+  ClassifierState, classification_store,
 };
+use dns_smart_block_queue_processor::db::insert_event;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -159,7 +160,7 @@ async fn test_insert_event_error() {
 
 #[tokio::test]
 #[ignore] // Requires DATABASE_URL
-async fn test_update_projections() {
+async fn test_classification_store() {
   let pool = setup_test_db().await;
 
   let domain = "gaming-site.com";
@@ -171,7 +172,7 @@ async fn test_update_projections() {
   let ttl_days = 10;
 
   // Update projections (creates domain, prompt, and classification)
-  update_projections(
+  classification_store(
     &pool,
     domain,
     classification_type,
@@ -266,7 +267,7 @@ async fn test_update_projections_deduplicates_prompts() {
   let prompt_hash = "sha256:same1234";
 
   // Update projections for first domain
-  update_projections(
+  classification_store(
     &pool,
     domain1,
     "gaming",
@@ -282,7 +283,7 @@ async fn test_update_projections_deduplicates_prompts() {
   .expect("Failed to update projections for domain1");
 
   // Update projections for second domain with same prompt
-  update_projections(
+  classification_store(
     &pool,
     domain2,
     "gaming",
@@ -356,7 +357,7 @@ async fn test_upsert_domain_updates_timestamp() {
   let domain = "timestamp-test.com";
 
   // First insert
-  update_projections(
+  classification_store(
     &pool,
     domain,
     "gaming",
@@ -385,7 +386,7 @@ async fn test_upsert_domain_updates_timestamp() {
   tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
   // Second insert with different classification
-  update_projections(
+  classification_store(
     &pool,
     domain,
     "gaming",
@@ -438,9 +439,10 @@ async fn test_get_classifier_states_all_missing() {
   let classification_types =
     vec!["gaming".to_string(), "video-streaming".to_string()];
 
-  let states = get_classifier_states(&pool, domain, &classification_types)
-    .await
-    .expect("Failed to get classifier states");
+  let states =
+    ClassifierState::domain_states(&pool, domain, &classification_types)
+      .await
+      .expect("Failed to get classifier states");
 
   assert_eq!(states.len(), 2);
   assert_eq!(states[0].0, "gaming");
@@ -458,7 +460,7 @@ async fn test_get_classifier_states_current() {
   let classification_types = vec!["gaming".to_string()];
 
   // Create a current classification (valid for 10 days).
-  update_projections(
+  classification_store(
     &pool,
     domain,
     "gaming",
@@ -473,9 +475,10 @@ async fn test_get_classifier_states_current() {
   .await
   .expect("Failed to update projections");
 
-  let states = get_classifier_states(&pool, domain, &classification_types)
-    .await
-    .expect("Failed to get classifier states");
+  let states =
+    ClassifierState::domain_states(&pool, domain, &classification_types)
+      .await
+      .expect("Failed to get classifier states");
 
   assert_eq!(states.len(), 1);
   assert_eq!(states[0].0, "gaming");
@@ -534,9 +537,10 @@ async fn test_get_classifier_states_expired() {
     .await
     .expect("Failed to insert expired classification");
 
-  let states = get_classifier_states(&pool, domain, &classification_types)
-    .await
-    .expect("Failed to get classifier states");
+  let states =
+    ClassifierState::domain_states(&pool, domain, &classification_types)
+      .await
+      .expect("Failed to get classifier states");
 
   assert_eq!(states.len(), 1);
   assert_eq!(states[0].0, "gaming");
@@ -565,9 +569,10 @@ async fn test_get_classifier_states_error() {
   .await
   .expect("Failed to insert error event");
 
-  let states = get_classifier_states(&pool, domain, &classification_types)
-    .await
-    .expect("Failed to get classifier states");
+  let states =
+    ClassifierState::domain_states(&pool, domain, &classification_types)
+      .await
+      .expect("Failed to get classifier states");
 
   assert_eq!(states.len(), 1);
   assert_eq!(states[0].0, "gaming");
@@ -588,7 +593,7 @@ async fn test_get_classifier_states_mixed() {
   ];
 
   // gaming: Current (valid classification).
-  update_projections(
+  classification_store(
     &pool,
     domain,
     "gaming",
@@ -661,9 +666,10 @@ async fn test_get_classifier_states_mixed() {
 
   // news: Missing (no classification, no events).
 
-  let states = get_classifier_states(&pool, domain, &classification_types)
-    .await
-    .expect("Failed to get classifier states");
+  let states =
+    ClassifierState::domain_states(&pool, domain, &classification_types)
+      .await
+      .expect("Failed to get classifier states");
 
   assert_eq!(states.len(), 4);
 

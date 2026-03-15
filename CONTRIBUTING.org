@@ -155,19 +155,21 @@ impl DomainFreeze {
 
 ** Current types in ~db_models.rs~
 
-| Type                      | Purpose                                               |
-|---------------------------+-------------------------------------------------------|
-| ~ClassificationInsert~    | Insert a new projection row                           |
-| ~Classification~          | Read a classification; find blocked domains           |
-| ~ClassificationEventInsert~ | Insert an event row                                 |
-| ~ClassificationEvent~     | Read a full event record                              |
-| ~PromptInsert~            | Upsert a prompt, returning its ID                     |
-| ~Prompt~                  | Read a prompt record                                  |
-| ~DomainUpsert~            | Upsert a domain into the ~domains~ table              |
-| ~Domain~                  | Read a domain record                                  |
-| ~DomainExpire~            | Expire all valid classifications + insert ~expired~ event |
-| ~DomainRequeue~           | Insert a ~queued~ event to trigger re-classification  |
-| ~ErroredClassification~   | Query (domain, type) pairs whose latest event is ~error~ |
+| Type                        | Purpose                                                    |
+|-----------------------------+------------------------------------------------------------|
+| ~ClassificationInsert~      | Insert a new projection row                                |
+| ~Classification~            | Read a classification; find blocked domains                |
+| ~ClassificationEventInsert~ | Insert an event row                                        |
+| ~ClassificationEvent~       | Read a full event record; query latest event or consecutive errors |
+| ~PromptInsert~              | Upsert a prompt, returning its ID                          |
+| ~Prompt~                    | Read a prompt record                                       |
+| ~DomainUpsert~              | Upsert a domain into the ~domains~ table                   |
+| ~Domain~                    | Read a domain record                                       |
+| ~DomainExpire~              | Expire all valid classifications + insert ~expired~ event  |
+| ~DomainRequeue~             | Insert a ~queued~ event to trigger re-classification       |
+| ~ErroredClassification~     | Query (domain, type) pairs whose latest event is ~error~   |
+| ~ClassifierState~           | Enum + ~domain_states~ query: per-type state (Current/Expired/Error/Missing) |
+| ~classification_store~      | Transactional write: upsert prompt + domain + insert projection |
 
 * Adding new features
 

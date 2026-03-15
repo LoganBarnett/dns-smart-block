@@ -68,21 +68,3 @@ pub async fn should_queue_domain(
     }
   }
 }
-
-/// Insert a "queued" event for a domain
-pub async fn insert_queued_event(
-  pool: &PgPool,
-  domain: &str,
-) -> Result<(), DbError> {
-  sqlx::query(
-        r#"
-        INSERT INTO domain_classification_events (domain, action, action_data, created_at)
-        VALUES ($1, 'queued'::classification_action, '{}'::jsonb, NOW())
-        "#,
-    )
-    .bind(domain)
-    .execute(pool)
-    .await?;
-
-  Ok(())
-}

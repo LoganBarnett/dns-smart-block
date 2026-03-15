@@ -196,9 +196,9 @@ impl Config {
       if let Some(conf) = classifier.min_confidence {
         if !(0.0..=1.0).contains(&conf) {
           return Err(ConfigError::ValidationError(format!(
-                        "Classifier '{}': min_confidence must be between 0.0 and 1.0, got {}",
-                        classifier.name, conf
-                    )));
+            "Classifier '{}': min_confidence must be between 0.0 and 1.0, got {}",
+            classifier.name, conf
+          )));
         }
       }
 
@@ -287,10 +287,12 @@ model = "llama3.2:3b"
     let config: Config = toml::from_str(config_content).unwrap();
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result
-      .unwrap_err()
-      .to_string()
-      .contains("No classifiers configured"));
+    assert!(
+      result
+        .unwrap_err()
+        .to_string()
+        .contains("No classifiers configured")
+    );
   }
 
   #[test]

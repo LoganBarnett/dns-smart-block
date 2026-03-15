@@ -1,6 +1,5 @@
-use dns_smart_block_log_processor::db::{
-  insert_queued_event, should_queue_domain,
-};
+use dns_smart_block_common::db_models::ClassificationEventInsert;
+use dns_smart_block_log_processor::db::should_queue_domain;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -61,9 +60,15 @@ async fn test_should_not_queue_when_already_queued() {
   let domain = "already-queued.com";
 
   // Insert a "queued" event
-  insert_queued_event(&pool, domain)
-    .await
-    .expect("Failed to insert queued event");
+  ClassificationEventInsert {
+    domain: domain.to_string(),
+    action: "queued".to_string(),
+    action_data: serde_json::json!({}),
+    prompt_id: None,
+  }
+  .insert(&pool)
+  .await
+  .expect("Failed to insert queued event");
 
   // Should not queue again
   let should_queue = should_queue_domain(&pool, domain)
@@ -202,9 +207,15 @@ async fn test_insert_queued_event() {
   let domain = "test-domain.com";
 
   // Insert a queued event
-  insert_queued_event(&pool, domain)
-    .await
-    .expect("Failed to insert queued event");
+  ClassificationEventInsert {
+    domain: domain.to_string(),
+    action: "queued".to_string(),
+    action_data: serde_json::json!({}),
+    prompt_id: None,
+  }
+  .insert(&pool)
+  .await
+  .expect("Failed to insert queued event");
 
   // Verify it was inserted
   let result = sqlx::query(

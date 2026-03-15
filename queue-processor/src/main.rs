@@ -5,11 +5,13 @@ mod db;
 use clap::Parser;
 use config::{ClassifierConfig, Config};
 use database_url::{construct_database_url, sanitize_database_url};
-use db::{ClassifierState, DbError};
+use db::DbError;
 use dns_smart_block_classifier::{
   compute_prompt_hash, output::ClassificationOutput,
 };
-use dns_smart_block_common::db_models::PromptInsert;
+use dns_smart_block_common::db_models::{
+  ClassifierState, PromptInsert, classification_store,
+};
 use dns_smart_block_common::logging::LoggingArgs;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -229,7 +231,7 @@ async fn process_domain(
     config.classifiers.iter().map(|c| c.name.clone()).collect();
 
   let states =
-    db::get_classifier_states(pool, domain, &classification_types).await?;
+    ClassifierState::domain_states(pool, domain, &classification_types).await?;
 
   // Process each classifier based on its state.
   for (classification_type, state) in states {
@@ -356,13 +358,14 @@ async fn process_domain(
         // Only store if confidence meets minimum threshold
         if output.classification.confidence >= min_confidence {
           info!(
-                        "Updating projections for {} (classifier '{}'): is_matching={}, confidence={}",
-                        domain, classifier_config.name,
-                        output.classification.is_matching_site,
-                        output.classification.confidence
-                    );
+            "Updating projections for {} (classifier '{}'): is_matching={}, confidence={}",
+            domain,
+            classifier_config.name,
+            output.classification.is_matching_site,
+            output.classification.confidence
+          );
 
-          db::update_projections(
+          classification_store(
             pool,
             domain,
             &classifier_config.name,
@@ -382,9 +385,12 @@ async fn process_domain(
           );
         } else {
           info!(
-                        "Domain {} below confidence threshold ({} < {}) for classifier '{}', skipping projection",
-                        domain, output.classification.confidence, min_confidence, classifier_config.name
-                    );
+            "Domain {} below confidence threshold ({} < {}) for classifier '{}', skipping projection",
+            domain,
+            output.classification.confidence,
+            min_confidence,
+            classifier_config.name
+          );
         }
       }
       Err(e) => {
