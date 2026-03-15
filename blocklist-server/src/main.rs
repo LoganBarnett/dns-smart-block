@@ -1,5 +1,6 @@
 mod db;
 
+use axum::http::header;
 use axum::{
   Router,
   extract::{Query, State},
@@ -9,6 +10,9 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use clap::Parser;
+use dns_smart_block_blocklist_server::{
+  CLASSIFICATIONS_CSS, CLASSIFICATIONS_HTML, CLASSIFICATIONS_JS,
+};
 use dns_smart_block_common::logging::LoggingArgs;
 use lazy_static::lazy_static;
 use prometheus::register_int_counter;
@@ -23,7 +27,6 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -406,21 +409,8 @@ fn render_classifications_html(
     })
     .collect();
 
-  // Read the HTML template from file
-  let template_path = "blocklist-server/templates/classifications.html";
-  let template = std::fs::read_to_string(template_path).unwrap_or_else(|e| {
-    let cwd = std::env::current_dir()
-      .map(|p| p.display().to_string())
-      .unwrap_or_else(|_| "<unknown>".to_string());
-    error!(
-      "Failed to read template file '{}': {} (current directory: {})",
-      template_path, e, cwd
-    );
-    String::from("<html><body>Error loading template</body></html>")
-  });
-
-  // Perform substitutions
-  template
+  // Perform substitutions on the compile-time embedded template
+  CLASSIFICATIONS_HTML
     .replace("{{FILTER_INFO}}", &filter_info)
     .replace("{{COUNT}}", &classifications.len().to_string())
     .replace("{{ROWS}}", &rows)
@@ -522,12 +512,24 @@ async fn expire(
   }
 }
 
+async fn static_css() -> impl IntoResponse {
+  ([(header::CONTENT_TYPE, "text/css")], CLASSIFICATIONS_CSS)
+}
+
+async fn static_js() -> impl IntoResponse {
+  (
+    [(header::CONTENT_TYPE, "application/javascript")],
+    CLASSIFICATIONS_JS,
+  )
+}
+
 fn create_admin_router(state: AppState) -> Router {
   Router::new()
     .route("/classifications", get(get_classifications))
     .route("/reprojection", post(reprojection))
     .route("/expire", post(expire))
-    .nest_service("/static", ServeDir::new("blocklist-server/static"))
+    .route("/static/classifications.css", get(static_css))
+    .route("/static/classifications.js", get(static_js))
     .layer(TraceLayer::new_for_http())
     .with_state(state)
 }

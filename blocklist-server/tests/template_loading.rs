@@ -1,147 +1,86 @@
-use std::path::PathBuf;
+// These tests verify the embedded template and static assets that are compiled
+// into the binary via include_str!/include_bytes!.  The compiler enforces that
+// the source files exist at build time, so there is no need to test for file
+// presence at runtime.
 
-/// Helper to find the project root by looking for Cargo.toml
-fn find_project_root() -> PathBuf {
-  let mut current =
-    std::env::current_dir().expect("Failed to get current directory");
-
-  // Try to find workspace root (contains top-level Cargo.toml)
-  loop {
-    let cargo_toml = current.join("Cargo.toml");
-    if cargo_toml.exists() {
-      // Check if this is the workspace root by looking for blocklist-server directory
-      if current.join("blocklist-server").exists() {
-        return current;
-      }
-    }
-
-    if !current.pop() {
-      break;
-    }
-  }
-
-  // Fallback to current dir
-  std::env::current_dir().expect("Failed to get current directory")
-}
-
-fn get_template_path() -> PathBuf {
-  find_project_root().join("blocklist-server/templates/classifications.html")
-}
-
-fn get_css_path() -> PathBuf {
-  find_project_root().join("blocklist-server/static/classifications.css")
-}
-
-fn get_js_path() -> PathBuf {
-  find_project_root().join("blocklist-server/static/classifications.js")
-}
+// Re-export the constants from main so we can test them here.  These are
+// embedded at compile time and will fail the build if the source files are
+// missing or cannot be read.
+use dns_smart_block_blocklist_server::CLASSIFICATIONS_CSS;
+use dns_smart_block_blocklist_server::CLASSIFICATIONS_HTML;
+use dns_smart_block_blocklist_server::CLASSIFICATIONS_JS;
 
 #[test]
-fn test_template_file_exists() {
-  let template_path = get_template_path();
+fn test_template_contains_placeholders() {
   assert!(
-    template_path.exists(),
-    "Template file should exist at {}",
-    template_path.display()
+    CLASSIFICATIONS_HTML.contains("{{FILTER_INFO}}"),
+    "Template should contain {{{{FILTER_INFO}}}} placeholder."
+  );
+  assert!(
+    CLASSIFICATIONS_HTML.contains("{{COUNT}}"),
+    "Template should contain {{{{COUNT}}}} placeholder."
+  );
+  assert!(
+    CLASSIFICATIONS_HTML.contains("{{ROWS}}"),
+    "Template should contain {{{{ROWS}}}} placeholder."
   );
 }
 
 #[test]
-fn test_template_file_readable() {
-  let template_path = get_template_path();
-  let content = std::fs::read_to_string(&template_path)
-    .expect("Should be able to read template file");
-
-  // Verify template contains expected placeholders
+fn test_template_references_static_assets() {
   assert!(
-    content.contains("{{FILTER_INFO}}"),
-    "Template should contain {{{{FILTER_INFO}}}} placeholder"
+    CLASSIFICATIONS_HTML.contains("/static/classifications.css"),
+    "Template should reference the embedded CSS asset."
   );
   assert!(
-    content.contains("{{COUNT}}"),
-    "Template should contain {{{{COUNT}}}} placeholder"
-  );
-  assert!(
-    content.contains("{{ROWS}}"),
-    "Template should contain {{{{ROWS}}}} placeholder"
-  );
-
-  // Verify template references static assets
-  assert!(
-    content.contains("/static/classifications.css"),
-    "Template should reference CSS file"
-  );
-  assert!(
-    content.contains("/static/classifications.js"),
-    "Template should reference JS file"
+    CLASSIFICATIONS_HTML.contains("/static/classifications.js"),
+    "Template should reference the embedded JS asset."
   );
 }
 
 #[test]
-fn test_static_files_exist() {
-  let css_path = get_css_path();
-  let js_path = get_js_path();
-
+fn test_static_assets_non_empty() {
   assert!(
-    css_path.exists(),
-    "CSS file should exist at {}",
-    css_path.display()
+    !CLASSIFICATIONS_CSS.is_empty(),
+    "Embedded CSS should not be empty."
   );
   assert!(
-    js_path.exists(),
-    "JS file should exist at {}",
-    js_path.display()
+    !CLASSIFICATIONS_JS.is_empty(),
+    "Embedded JS should not be empty."
   );
 }
 
 #[test]
-fn test_static_files_readable() {
-  let css_path = get_css_path();
-  let js_path = get_js_path();
+fn test_static_assets_content() {
+  let css = std::str::from_utf8(CLASSIFICATIONS_CSS)
+    .expect("CSS should be valid UTF-8.");
+  let js =
+    std::str::from_utf8(CLASSIFICATIONS_JS).expect("JS should be valid UTF-8.");
 
-  let css_content = std::fs::read_to_string(&css_path)
-    .expect("Should be able to read CSS file");
-  let js_content =
-    std::fs::read_to_string(&js_path).expect("Should be able to read JS file");
-
-  // Basic sanity checks
+  assert!(css.contains("body"), "CSS should contain body styles.");
   assert!(
-    css_content.contains("body"),
-    "CSS should contain body styles"
+    js.contains("sortTable"),
+    "JS should contain sortTable function."
   );
   assert!(
-    js_content.contains("sortTable"),
-    "JS should contain sortTable function"
-  );
-  assert!(
-    js_content.contains("expireDomain"),
-    "JS should contain expireDomain function"
+    js.contains("expireDomain"),
+    "JS should contain expireDomain function."
   );
 }
 
 #[test]
 fn test_template_substitution() {
-  let template_path = get_template_path();
-  let template = std::fs::read_to_string(&template_path)
-    .expect("Should be able to read template file");
-
-  // Test basic substitution
-  let result = template
+  let result = CLASSIFICATIONS_HTML
     .replace("{{FILTER_INFO}}", " - Test Filter")
     .replace("{{COUNT}}", "42")
     .replace("{{ROWS}}", "<tr><td>test</td></tr>");
 
-  // Verify substitution worked and no error message appears
-  assert!(
-    !result.contains("Error loading template"),
-    "Rendered template should not contain error message"
-  );
   assert!(
     result.contains("Total: 42 classification(s)"),
-    "Template should render count correctly"
+    "Template should render count correctly."
   );
   assert!(
     result.contains("<tr><td>test</td></tr>"),
-    "Template should render rows correctly"
+    "Template should render rows correctly."
   );
 }
