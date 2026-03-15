@@ -65,6 +65,7 @@ fn create_gaming_site_metadata() -> SiteMetadata {
         og_site_name: Some("Awesome Game Store".to_string()),
         language: Some("en".to_string()),
         http_status: 200,
+        fetch_error: None,
     }
 }
 
@@ -132,6 +133,7 @@ async fn test_classify_non_gaming_site_with_mock_ollama() {
         og_site_name: Some("Daily News".to_string()),
         language: Some("en".to_string()),
         http_status: 200,
+        fetch_error: None,
     };
 
     // Set up the mock response for a non-gaming site

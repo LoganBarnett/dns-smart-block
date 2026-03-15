@@ -163,11 +163,12 @@ pub fn extract_metadata(
   let title = text_from_css_selector(&document, "title");
   let description =
     attr_from_css_selector(&document, "meta[name='description']", "content");
-  let og_title = text_from_css_selector(&document, "meta[property='og:title']");
+  let og_title =
+    attr_from_css_selector(&document, "meta[property='og:title']", "content");
   let og_description =
-    text_from_css_selector(&document, "meta[property='og:description']");
+    attr_from_css_selector(&document, "meta[property='og:description']", "content");
   let og_site_name =
-    text_from_css_selector(&document, "meta[property='og:site_name']");
+    attr_from_css_selector(&document, "meta[property='og:site_name']", "content");
   let language = attr_from_css_selector(&document, "html", "lang");
   Ok(SiteMetadata {
     domain: domain.to_string(),
@@ -180,4 +181,345 @@ pub fn extract_metadata(
     http_status: status,
     fetch_error: None,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_extract_metadata_all_fields_present() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <title>Test Page Title</title>
+          <meta name="description" content="This is a test description">
+          <meta property="og:title" content="OG Test Title">
+          <meta property="og:description" content="OG Test Description">
+          <meta property="og:site_name" content="Test Site">
+        </head>
+        <body>
+          <h1>Hello World</h1>
+        </body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.domain, "example.com");
+    assert_eq!(result.title, Some("Test Page Title".to_string()));
+    assert_eq!(
+      result.description,
+      Some("This is a test description".to_string())
+    );
+    assert_eq!(result.og_title, Some("OG Test Title".to_string()));
+    assert_eq!(
+      result.og_description,
+      Some("OG Test Description".to_string())
+    );
+    assert_eq!(result.og_site_name, Some("Test Site".to_string()));
+    assert_eq!(result.language, Some("en".to_string()));
+    assert_eq!(result.http_status, 200);
+    assert_eq!(result.fetch_error, None);
+  }
+
+  #[test]
+  fn test_extract_metadata_missing_title() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <meta name="description" content="Description without title">
+        </head>
+        <body>
+          <h1>No Title Tag</h1>
+        </body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.title, None);
+    assert_eq!(
+      result.description,
+      Some("Description without title".to_string())
+    );
+  }
+
+  #[test]
+  fn test_extract_metadata_missing_description() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <title>Title without Description</title>
+        </head>
+        <body>
+          <p>No description meta tag</p>
+        </body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.title, Some("Title without Description".to_string()));
+    assert_eq!(result.description, None);
+  }
+
+  #[test]
+  fn test_extract_metadata_missing_og_tags() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <title>Basic Page</title>
+          <meta name="description" content="Basic description">
+        </head>
+        <body>
+          <p>No Open Graph tags</p>
+        </body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.title, Some("Basic Page".to_string()));
+    assert_eq!(result.description, Some("Basic description".to_string()));
+    assert_eq!(result.og_title, None);
+    assert_eq!(result.og_description, None);
+    assert_eq!(result.og_site_name, None);
+  }
+
+  #[test]
+  fn test_extract_metadata_missing_language() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>No Language Specified</title>
+        </head>
+        <body>
+          <p>HTML tag has no lang attribute</p>
+        </body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.language, None);
+    assert_eq!(result.title, Some("No Language Specified".to_string()));
+  }
+
+  #[test]
+  fn test_extract_metadata_all_fields_missing() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html>
+        <head>
+        </head>
+        <body>
+          <p>Minimal HTML</p>
+        </body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 404).unwrap();
+
+    assert_eq!(result.domain, "example.com");
+    assert_eq!(result.title, None);
+    assert_eq!(result.description, None);
+    assert_eq!(result.og_title, None);
+    assert_eq!(result.og_description, None);
+    assert_eq!(result.og_site_name, None);
+    assert_eq!(result.language, None);
+    assert_eq!(result.http_status, 404);
+    assert_eq!(result.fetch_error, None);
+  }
+
+  #[test]
+  fn test_extract_metadata_whitespace_trimming() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="  en  ">
+        <head>
+          <title>  Title with spaces  </title>
+          <meta name="description" content="  Description with spaces  ">
+        </head>
+        <body></body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.title, Some("Title with spaces".to_string()));
+    assert_eq!(
+      result.description,
+      Some("Description with spaces".to_string())
+    );
+    assert_eq!(result.language, Some("en".to_string()));
+  }
+
+  #[test]
+  fn test_extract_metadata_empty_content() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="">
+        <head>
+          <title></title>
+          <meta name="description" content="">
+          <meta property="og:title" content="">
+        </head>
+        <body></body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.title, None);
+    assert_eq!(result.description, None);
+    assert_eq!(result.og_title, None);
+    assert_eq!(result.language, None);
+  }
+
+  #[test]
+  fn test_extract_metadata_partial_og_tags() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="es">
+        <head>
+          <title>Partial OG</title>
+          <meta property="og:title" content="OG Title Only">
+        </head>
+        <body></body>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.og_title, Some("OG Title Only".to_string()));
+    assert_eq!(result.og_description, None);
+    assert_eq!(result.og_site_name, None);
+    assert_eq!(result.language, Some("es".to_string()));
+  }
+
+  #[test]
+  fn test_extract_metadata_various_language_codes() {
+    let test_cases = vec![
+      ("en", "en"),
+      ("en-US", "en-US"),
+      ("fr-FR", "fr-FR"),
+      ("zh-CN", "zh-CN"),
+      ("ja", "ja"),
+    ];
+
+    for (input_lang, expected_lang) in test_cases {
+      let html = format!(
+        r#"
+        <!DOCTYPE html>
+        <html lang="{}">
+          <head><title>Test</title></head>
+          <body></body>
+        </html>
+      "#,
+        input_lang
+      );
+
+      let result = extract_metadata("example.com", &html, 200).unwrap();
+      assert_eq!(
+        result.language,
+        Some(expected_lang.to_string()),
+        "Failed for language: {}",
+        input_lang
+      );
+    }
+  }
+
+  #[test]
+  fn test_extract_metadata_malformed_html() {
+    let html = r#"
+      <html><head><title>Unclosed tags
+      <meta name="description" content="Missing closing quote>
+      <body>Random content
+    "#;
+
+    let result = extract_metadata("example.com", html, 200);
+
+    assert!(result.is_ok(), "Should handle malformed HTML gracefully");
+    let metadata = result.unwrap();
+    assert_eq!(metadata.domain, "example.com");
+  }
+
+  #[test]
+  fn test_extract_metadata_http_status_codes() {
+    let html = r#"<html><head><title>Test</title></head></html>"#;
+
+    let status_codes = vec![200, 301, 302, 404, 500, 503];
+
+    for status in status_codes {
+      let result = extract_metadata("example.com", html, status).unwrap();
+      assert_eq!(
+        result.http_status, status,
+        "HTTP status should be preserved"
+      );
+    }
+  }
+
+  #[test]
+  fn test_site_metadata_from_fetch_error() {
+    let metadata = SiteMetadata::from_fetch_error("example.com", "Connection timeout");
+
+    assert_eq!(metadata.domain, "example.com");
+    assert_eq!(metadata.title, None);
+    assert_eq!(metadata.description, None);
+    assert_eq!(metadata.og_title, None);
+    assert_eq!(metadata.og_description, None);
+    assert_eq!(metadata.og_site_name, None);
+    assert_eq!(metadata.language, None);
+    assert_eq!(metadata.http_status, 0);
+    assert_eq!(
+      metadata.fetch_error,
+      Some("Connection timeout".to_string())
+    );
+  }
+
+  #[test]
+  fn test_extract_metadata_og_content_attribute() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta property="og:description" content="OG Description via content attribute">
+          <meta property="og:site_name" content="Site Name via content attribute">
+        </head>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(
+      result.og_description,
+      Some("OG Description via content attribute".to_string())
+    );
+    assert_eq!(
+      result.og_site_name,
+      Some("Site Name via content attribute".to_string())
+    );
+  }
+
+  #[test]
+  fn test_extract_metadata_complex_title_with_entities() {
+    let html = r#"
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <title>Test &amp; Example - Site Name</title>
+        </head>
+      </html>
+    "#;
+
+    let result = extract_metadata("example.com", html, 200).unwrap();
+
+    assert_eq!(result.title, Some("Test & Example - Site Name".to_string()));
+  }
 }
