@@ -207,28 +207,28 @@ in {
         description = "Enable HTTP blocklist server for serving DNS blocklists";
       };
 
-      publicBindAddress = mkOption {
+      publicBindHost = mkOption {
         type = types.str;
-        default = "0.0.0.0:3000";
-        description = "Address and port to bind the public server to (blocklist, metrics, health)";
+        default = "0.0.0.0";
+        description = "Host to bind the public server to (blocklist, metrics, health)";
       };
 
-      adminBindAddress = mkOption {
-        type = types.str;
-        default = "127.0.0.1:8080";
-        description = "Address and port to bind the admin server to (classifications, reprojection)";
+      publicBindPort = mkOption {
+        type = types.port;
+        default = 3000;
+        description = "Port to bind the public server to (blocklist, metrics, health)";
       };
 
       adminBindHost = mkOption {
         type = types.str;
         default = "127.0.0.1";
-        description = "Host for admin server (extracted from adminBindAddress for nginx configuration)";
+        description = "Host to bind the admin server to (classifications, reprojection)";
       };
 
       adminBindPort = mkOption {
         type = types.port;
         default = 8080;
-        description = "Port for admin server (extracted from adminBindAddress for nginx configuration)";
+        description = "Port to bind the admin server to (classifications, reprojection)";
       };
     };
 
@@ -583,11 +583,13 @@ in {
           Group = serviceGroup;
 
           ExecStart = let
+            publicBindAddress = "${cfg.blocklistServer.publicBindHost}:${toString cfg.blocklistServer.publicBindPort}";
+            adminBindAddress = "${cfg.blocklistServer.adminBindHost}:${toString cfg.blocklistServer.adminBindPort}";
             args = lib.concatStringsSep " " ([
               "${packages.blocklist-server}/bin/dns-smart-block-blocklist-server"
               "--database-url '${databaseUrl}'"
-              "--public-bind-address '${cfg.blocklistServer.publicBindAddress}'"
-              "--admin-bind-address '${cfg.blocklistServer.adminBindAddress}'"
+              "--public-bind-address '${publicBindAddress}'"
+              "--admin-bind-address '${adminBindAddress}'"
             ] ++ lib.optionals (cfg.database.passwordFile != null) [
               "--database-password-file '${cfg.database.passwordFile}'"
             ]);
