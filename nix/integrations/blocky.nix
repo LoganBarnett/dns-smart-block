@@ -14,7 +14,7 @@ in {
     blocklistUrl = mkOption {
       type = types.str;
       default = "http://localhost:3000";
-      example = "http://silicon.proton:3000";
+      example = "http://dns-smart-block.example.com:3000";
       description = ''
         Base URL of the dns-smart-block blocklist server.
         The integration will append /blocklist?type=<classifier> to this URL.

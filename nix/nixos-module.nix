@@ -57,7 +57,7 @@
 
       ttlDays = mkOption {
         type = types.int;
-        default = 7;
+        default = 30;
         description = "Time-to-live in days for cached classifications. After this many days, a domain will be re-classified.";
       };
     };
@@ -212,6 +212,24 @@ in {
       };
     };
 
+    # Domain Exclusions
+    excludeSuffixes = mkOption {
+      type = types.listOf types.str;
+      default = [];
+      example = [ ".example.com" ".local" ];
+      description = ''
+        Domain suffixes excluded from LLM classification.  Domains whose names
+        end with any listed suffix receive a synthetic "not matching"
+        classification at confidence 1.0, creating an audit trail without
+        invoking the LLM.
+
+        Use leading-dot notation (e.g. <literal>.example.com</literal>) to match a
+        TLD and all names under it.  A bare name (e.g.
+        <literal>example.com</literal>) matches any domain whose string
+        representation ends with it, including subdomains.
+      '';
+    };
+
     # Blocklist Server Configuration
     blocklistServer = {
       enable = mkOption {
@@ -363,6 +381,10 @@ in {
       [defaults]
       min_confidence = ${toString cfg.queueProcessor.minConfidence}
       ttl_days = 7
+
+      ${lib.optionalString (cfg.excludeSuffixes != []) ''
+      exclude_suffixes = ${builtins.toJSON cfg.excludeSuffixes}
+      ''}
 
       ${classifierSections}
     '';

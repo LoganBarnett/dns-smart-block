@@ -136,6 +136,17 @@ pub struct Config {
   /// List of classifiers to run on each domain
   #[serde(rename = "classifier", default)]
   pub classifiers: Vec<ClassifierConfig>,
+
+  /// Domain suffixes excluded from LLM classification.  Domains whose names
+  /// end with any listed suffix receive a synthetic "not matching"
+  /// classification at confidence 1.0, creating an audit trail without
+  /// invoking the LLM.
+  ///
+  /// Leading-dot notation (e.g. ".example.com") matches that domain and all
+  /// under it.  A bare name (e.g. "example.com") matches any domain whose
+  /// string representation ends with it, including subdomains.
+  #[serde(default)]
+  pub exclude_suffixes: Vec<String>,
 }
 
 impl Default for HttpConfig {
@@ -226,6 +237,14 @@ impl Config {
         "Global ttl_days must be non-negative, got {}",
         self.defaults.ttl_days
       )));
+    }
+
+    for suffix in &self.exclude_suffixes {
+      if suffix.is_empty() {
+        return Err(ConfigError::ValidationError(
+          "exclude_suffixes entries must not be empty".to_string(),
+        ));
+      }
     }
 
     Ok(())

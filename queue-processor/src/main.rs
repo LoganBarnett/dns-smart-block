@@ -2,6 +2,7 @@ mod config;
 mod database_url;
 mod db;
 
+use chrono::{Duration, Utc};
 use clap::Parser;
 use config::{ClassifierConfig, Config};
 use database_url::{construct_database_url, sanitize_database_url};
@@ -10,7 +11,8 @@ use dns_smart_block_classifier::{
   compute_prompt_hash, output::ClassificationOutput,
 };
 use dns_smart_block_common::db_models::{
-  ClassifierState, PromptInsert, classification_store,
+  ClassificationInsert, ClassifierState, DomainUpsert, PromptInsert,
+  classification_store,
 };
 use dns_smart_block_common::logging::LoggingArgs;
 use futures::StreamExt;
@@ -218,6 +220,62 @@ async fn run_classifier(
   }
 }
 
+/// Writes a synthetic "not matching" classification for a domain that matches
+/// an exclude suffix, without invoking the LLM.  The projection row and the
+/// audit event are written atomically in a single transaction so the record is
+/// always consistent.
+async fn apply_exclude_rule(
+  domain: &str,
+  classification_type: &str,
+  matched_suffix: &str,
+  pool: &PgPool,
+  ttl_days: i64,
+) -> Result<()> {
+  let reasoning = format!("Excluded by suffix: {}", matched_suffix);
+  let now = Utc::now();
+
+  let mut tx = pool.begin().await?;
+
+  DomainUpsert {
+    domain: domain.to_string(),
+  }
+  .upsert(&mut tx)
+  .await?;
+
+  ClassificationInsert {
+    domain: domain.to_string(),
+    classification_type: classification_type.to_string(),
+    is_matching_site: false,
+    confidence: 1.0,
+    reasoning: Some(reasoning.clone()),
+    valid_on: now,
+    valid_until: now + Duration::days(ttl_days),
+    model: "exclude-rule".to_string(),
+    prompt_id: None,
+  }
+  .insert(&mut tx)
+  .await?;
+
+  db::insert_event(
+    &mut *tx,
+    domain,
+    "classified",
+    json!({
+      "classification_type": classification_type,
+      "is_matching_site": false,
+      "confidence": 1.0,
+      "reasoning": reasoning,
+      "exclusion_suffix": matched_suffix,
+      "model": "exclude-rule",
+    }),
+    None,
+  )
+  .await?;
+
+  tx.commit().await?;
+  Ok(())
+}
+
 async fn process_domain(
   domain: &str,
   config: &Config,
@@ -232,6 +290,43 @@ async fn process_domain(
 
   let states =
     ClassifierState::domain_states(pool, domain, &classification_types).await?;
+
+  // If the domain matches an exclude suffix, write a synthetic classification
+  // for each classifier that needs updating and return without running the LLM.
+  if let Some(matched_suffix) = config
+    .exclude_suffixes
+    .iter()
+    .find(|s| domain.ends_with(s.as_str()))
+  {
+    info!(
+      "Domain {} matches exclude suffix '{}', applying exclude rule",
+      domain, matched_suffix
+    );
+    for (classification_type, state) in &states {
+      if *state == ClassifierState::Current {
+        info!(
+          "Skipping exclude record for {} ({}): classification is current",
+          domain, classification_type
+        );
+        continue;
+      }
+      let ttl_days = config
+        .classifiers
+        .iter()
+        .find(|c| &c.name == classification_type)
+        .map(|c| c.effective_ttl_days(&config.defaults))
+        .unwrap_or(config.defaults.ttl_days);
+      apply_exclude_rule(
+        domain,
+        classification_type,
+        matched_suffix,
+        pool,
+        ttl_days,
+      )
+      .await?;
+    }
+    return Ok(());
+  }
 
   // Process each classifier based on its state.
   for (classification_type, state) in states {
