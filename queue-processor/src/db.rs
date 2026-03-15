@@ -72,7 +72,9 @@ pub async fn count_consecutive_errors(
     let result = sqlx::query(
         r#"
         WITH recent_events AS (
-            SELECT action::text
+            SELECT
+                action::text,
+                ROW_NUMBER() OVER (ORDER BY created_at DESC) as rn
             FROM domain_classification_events
             WHERE domain = $1
             ORDER BY created_at DESC
@@ -85,7 +87,7 @@ pub async fn count_consecutive_errors(
             SELECT 1
             FROM recent_events re2
             WHERE re2.action != 'error'
-            AND re2.rowid <= recent_events.rowid
+            AND re2.rn <= recent_events.rn
         )
         "#,
     )
