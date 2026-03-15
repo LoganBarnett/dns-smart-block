@@ -65,6 +65,7 @@
 in {
   imports = [
     ./integrations/blocky.nix
+    ./prometheus-exporter.nix
   ];
 
   options.services.dns-smart-block = {
