@@ -115,11 +115,7 @@ struct CliArgs {
   public_bind_address: String,
 
   /// Address to bind the admin server to (classifications, reprojection)
-  #[arg(
-    long,
-    env = "ADMIN_BIND_ADDRESS",
-    default_value = "127.0.0.1:8080"
-  )]
+  #[arg(long, env = "ADMIN_BIND_ADDRESS", default_value = "127.0.0.1:8080")]
   admin_bind_address: String,
 }
 

@@ -207,10 +207,28 @@ in {
         description = "Enable HTTP blocklist server for serving DNS blocklists";
       };
 
-      bindAddress = mkOption {
+      publicBindAddress = mkOption {
         type = types.str;
-        default = "127.0.0.1:3000";
-        description = "Address and port to bind the blocklist server to";
+        default = "0.0.0.0:3000";
+        description = "Address and port to bind the public server to (blocklist, metrics, health)";
+      };
+
+      adminBindAddress = mkOption {
+        type = types.str;
+        default = "127.0.0.1:8080";
+        description = "Address and port to bind the admin server to (classifications, reprojection)";
+      };
+
+      adminBindHost = mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = "Host for admin server (extracted from adminBindAddress for nginx configuration)";
+      };
+
+      adminBindPort = mkOption {
+        type = types.port;
+        default = 8080;
+        description = "Port for admin server (extracted from adminBindAddress for nginx configuration)";
       };
     };
 
@@ -568,7 +586,8 @@ in {
             args = lib.concatStringsSep " " ([
               "${packages.blocklist-server}/bin/dns-smart-block-blocklist-server"
               "--database-url '${databaseUrl}'"
-              "--bind-address '${cfg.blocklistServer.bindAddress}'"
+              "--public-bind-address '${cfg.blocklistServer.publicBindAddress}'"
+              "--admin-bind-address '${cfg.blocklistServer.adminBindAddress}'"
             ] ++ lib.optionals (cfg.database.passwordFile != null) [
               "--database-password-file '${cfg.database.passwordFile}'"
             ]);

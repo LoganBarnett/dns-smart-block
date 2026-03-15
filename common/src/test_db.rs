@@ -70,11 +70,10 @@ impl TestDb {
         .output()?;
 
       if !output.status.success() {
-        return Err(format!(
-          "initdb failed: {}",
-          String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
+        return Err(
+          format!("initdb failed: {}", String::from_utf8_lossy(&output.stderr))
+            .into(),
+        );
       }
     }
 
@@ -153,10 +152,10 @@ impl TestDb {
       Ok(output) => {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Ignore error if database already exists
-        if !output.status.success()
-          && !stderr.contains("already exists")
-        {
-          return Err(format!("Failed to create test database: {}", stderr).into());
+        if !output.status.success() && !stderr.contains("already exists") {
+          return Err(
+            format!("Failed to create test database: {}", stderr).into(),
+          );
         }
         println!("Test database ready");
         Ok(())
