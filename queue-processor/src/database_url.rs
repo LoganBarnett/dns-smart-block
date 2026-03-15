@@ -10,9 +10,6 @@ pub enum DatabaseUrlError {
 
   #[error("Failed to parse database URL: {0}")]
   UrlParseError(#[from] url::ParseError),
-
-  #[error("Database URL is missing")]
-  MissingUrl,
 }
 
 /// Construct a database URL with password from file if provided
