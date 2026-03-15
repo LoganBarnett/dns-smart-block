@@ -157,6 +157,7 @@ pub async fn insert_classification(
     tx: &mut Transaction<'_, Postgres>,
     domain: &str,
     classification_type: &str,
+    is_matching_site: bool,
     confidence: f32,
     reasoning: &str,
     model: &str,
@@ -169,13 +170,14 @@ pub async fn insert_classification(
     sqlx::query(
         r#"
         INSERT INTO domain_classifications (
-            domain, classification_type, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
+            domain, classification_type, is_matching_site, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
         "#,
     )
     .bind(domain)
     .bind(classification_type)
+    .bind(is_matching_site)
     .bind(confidence)
     .bind(reasoning)
     .bind(valid_on)
@@ -193,6 +195,7 @@ pub async fn update_projections(
     pool: &PgPool,
     domain: &str,
     classification_type: &str,
+    is_matching_site: bool,
     confidence: f64,
     reasoning: &str,
     model: &str,
@@ -213,6 +216,7 @@ pub async fn update_projections(
         &mut tx,
         domain,
         classification_type,
+        is_matching_site,
         confidence as f32,
         reasoning,
         model,

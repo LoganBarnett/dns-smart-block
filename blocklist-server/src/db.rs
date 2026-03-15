@@ -27,7 +27,7 @@ pub struct MetricsStats {
 }
 
 /// Get all blocked domains for a given classification type at a specific time
-/// Returns domains where the classification is valid at the given time
+/// Returns domains where the classification is valid at the given time and is_matching_site = true
 pub async fn get_blocked_domains(
     pool: &PgPool,
     classification_type: &str,
@@ -41,6 +41,7 @@ pub async fn get_blocked_domains(
         FROM domains d
         INNER JOIN domain_classifications dc ON d.domain = dc.domain
         WHERE dc.classification_type = $1
+          AND dc.is_matching_site = true
           AND dc.valid_on <= $2
           AND dc.valid_until > $2
         ORDER BY d.domain ASC
@@ -159,6 +160,7 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
 pub struct ClassificationDetail {
     pub domain: String,
     pub classification_type: String,
+    pub is_matching_site: bool,
     pub confidence: f32,
     pub reasoning: Option<String>,
     pub model: String,
@@ -181,6 +183,7 @@ pub async fn get_classifications(
             SELECT
                 dc.domain,
                 dc.classification_type,
+                dc.is_matching_site,
                 dc.confidence,
                 dc.reasoning,
                 dc.model,
@@ -204,6 +207,7 @@ pub async fn get_classifications(
             SELECT
                 dc.domain,
                 dc.classification_type,
+                dc.is_matching_site,
                 dc.confidence,
                 dc.reasoning,
                 dc.model,
@@ -227,6 +231,7 @@ pub async fn get_classifications(
             Ok(ClassificationDetail {
                 domain: row.try_get("domain")?,
                 classification_type: row.try_get("classification_type")?,
+                is_matching_site: row.try_get("is_matching_site")?,
                 confidence: row.try_get("confidence")?,
                 reasoning: row.try_get("reasoning")?,
                 model: row.try_get("model")?,

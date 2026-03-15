@@ -328,22 +328,26 @@ async fn process_domain(
                 )
                 .await?;
 
-                // Update projections if it's a matching site above threshold.
+                // Update projections for ALL classifications (positive and negative).
+                // This allows /classifications endpoint to show everything, while
+                // /blocklist filters to only positive matches.
                 let min_confidence = classifier_config.effective_min_confidence(&config.defaults);
                 let ttl_days = classifier_config.effective_ttl_days(&config.defaults);
 
-                if output.classification.is_matching_site
-                    && output.classification.confidence >= min_confidence
-                {
+                // Only store if confidence meets minimum threshold
+                if output.classification.confidence >= min_confidence {
                     info!(
-                        "Domain {} matches criteria for classifier '{}', updating projections",
-                        domain, classifier_config.name
+                        "Updating projections for {} (classifier '{}'): is_matching={}, confidence={}",
+                        domain, classifier_config.name,
+                        output.classification.is_matching_site,
+                        output.classification.confidence
                     );
 
                     db::update_projections(
                         pool,
                         domain,
                         &classifier_config.name,
+                        output.classification.is_matching_site,
                         output.classification.confidence,
                         &output.classification.reasoning,
                         &classifier_config.effective_ollama_model(&config.ollama),
@@ -359,8 +363,8 @@ async fn process_domain(
                     );
                 } else {
                     info!(
-                        "Domain {} does not match criteria or below confidence threshold for classifier '{}'",
-                        domain, classifier_config.name
+                        "Domain {} below confidence threshold ({} < {}) for classifier '{}', skipping projection",
+                        domain, output.classification.confidence, min_confidence, classifier_config.name
                     );
                 }
             }
