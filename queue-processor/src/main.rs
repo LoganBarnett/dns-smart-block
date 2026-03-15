@@ -15,7 +15,7 @@ use sqlx::PgPool;
 use std::path::PathBuf;
 use std::process::Stdio;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
@@ -134,6 +134,8 @@ async fn run_classifier(
         .spawn()?;
 
     // Read stdout and stderr concurrently.
+    // stdout: buffered until completion (small JSON payload)
+    // stderr: streamed line-by-line for live logging
     let (stdout_result, stderr_result) = tokio::join!(
         async {
             let mut buf = String::new();
@@ -143,26 +145,26 @@ async fn run_classifier(
             Ok::<String, std::io::Error>(buf)
         },
         async {
-            let mut buf = String::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                stderr.read_to_string(&mut buf).await?;
+            if let Some(stderr) = child.stderr.take() {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+
+                while let Some(line) = lines.next_line().await? {
+                    info!(
+                        classifier = %classifier_config.name,
+                        "{}",
+                        line
+                    );
+                }
             }
-            Ok::<String, std::io::Error>(buf)
+            Ok::<(), std::io::Error>(())
         }
     );
 
     let stdout_buf = stdout_result?;
-    let stderr_buf = stderr_result?;
+    stderr_result?;
 
     let _status = child.wait().await?;
-
-    // Log stderr (classifier logs)
-    if !stderr_buf.is_empty() {
-        info!(
-            "Classifier '{}' stderr:\n{}",
-            classifier_config.name, stderr_buf
-        );
-    }
 
     // Parse stdout as JSON
     if stdout_buf.is_empty() {
