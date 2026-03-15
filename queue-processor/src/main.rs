@@ -1,11 +1,13 @@
+mod config;
 mod database_url;
 mod db;
 
 use clap::Parser;
-use dns_smart_block_common::logging::LoggingArgs;
+use config::{ClassifierConfig, Config};
 use database_url::{construct_database_url, sanitize_database_url};
-use db::DbError;
+use db::{ClassifierState, DbError};
 use dns_smart_block_classifier::{compute_prompt_hash, output::ClassificationOutput};
+use dns_smart_block_common::logging::LoggingArgs;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -52,37 +54,9 @@ struct CliArgs {
     )]
     classifier_path: String,
 
-    /// Ollama server URL
-    #[arg(long, env = "OLLAMA_URL", default_value = "http://localhost:11434")]
-    ollama_url: String,
-
-    /// Ollama model to use
-    #[arg(long, env = "OLLAMA_MODEL", default_value = "llama2")]
-    ollama_model: String,
-
-    /// Path to prompt template file
-    #[arg(long, env = "PROMPT_TEMPLATE")]
-    prompt_template: PathBuf,
-
-    /// Classification type (e.g., "gaming")
-    #[arg(long, env = "CLASSIFICATION_TYPE", default_value = "gaming")]
-    classification_type: String,
-
-    /// HTTP timeout in seconds for fetching domains
-    #[arg(long, env = "HTTP_TIMEOUT_SEC", default_value = "10")]
-    http_timeout_sec: u64,
-
-    /// Maximum KB to download from each domain
-    #[arg(long, env = "HTTP_MAX_KB", default_value = "100")]
-    http_max_kb: usize,
-
-    /// Minimum confidence threshold to block (0.0 to 1.0)
-    #[arg(long, env = "MIN_CONFIDENCE", default_value = "0.8")]
-    min_confidence: f64,
-
-    /// TTL for classifications in days
-    #[arg(long, env = "CLASSIFICATION_TTL_DAYS", default_value = "10")]
-    ttl_days: i64,
+    /// Path to TOML configuration file
+    #[arg(long, env = "CONFIG_FILE")]
+    config_file: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -116,38 +90,50 @@ enum ProcessorError {
 
     #[error("Database URL error: {0}")]
     DatabaseUrlError(#[from] database_url::DatabaseUrlError),
+
+    #[error("Configuration error: {0}")]
+    ConfigError(#[from] config::ConfigError),
 }
 
 type Result<T> = std::result::Result<T, ProcessorError>;
 
 async fn run_classifier(
     domain: &str,
-    args: &CliArgs,
+    classifier_config: &ClassifierConfig,
+    config: &Config,
+    classifier_path: &str,
 ) -> Result<ClassificationOutput> {
-    info!("Running classifier for domain: {}", domain);
+    info!(
+        "Running classifier '{}' for domain: {}",
+        classifier_config.name, domain
+    );
 
-    let mut child = Command::new(&args.classifier_path)
+    let ollama_model = classifier_config.effective_ollama_model(&config.ollama);
+    let http_timeout_sec = classifier_config.effective_http_timeout_sec(&config.http);
+    let http_max_kb = classifier_config.effective_http_max_kb(&config.http);
+
+    let mut child = Command::new(classifier_path)
         .arg("--domain")
         .arg(domain)
         .arg("--ollama-url")
-        .arg(&args.ollama_url)
+        .arg(&config.ollama.url)
         .arg("--ollama-model")
-        .arg(&args.ollama_model)
+        .arg(&ollama_model)
         .arg("--prompt-template")
-        .arg(&args.prompt_template)
+        .arg(&classifier_config.prompt_template)
         .arg("--classification-type")
-        .arg(&args.classification_type)
+        .arg(&classifier_config.name)
         .arg("--http-timeout-sec")
-        .arg(args.http_timeout_sec.to_string())
+        .arg(http_timeout_sec.to_string())
         .arg("--http-max-kb")
-        .arg(args.http_max_kb.to_string())
+        .arg(http_max_kb.to_string())
         .arg("--output")
         .arg("json")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
 
-    // Read stdout and stderr concurrently (actually concurrent this time)
+    // Read stdout and stderr concurrently.
     let (stdout_result, stderr_result) = tokio::join!(
         async {
             let mut buf = String::new();
@@ -172,17 +158,24 @@ async fn run_classifier(
 
     // Log stderr (classifier logs)
     if !stderr_buf.is_empty() {
-        info!("Classifier stderr:\n{}", stderr_buf);
+        info!(
+            "Classifier '{}' stderr:\n{}",
+            classifier_config.name, stderr_buf
+        );
     }
 
     // Parse stdout as JSON
     if stdout_buf.is_empty() {
-        return Err(ProcessorError::ClassifierError(
-            "Classifier produced no output".to_string(),
-        ));
+        return Err(ProcessorError::ClassifierError(format!(
+            "Classifier '{}' produced no output",
+            classifier_config.name
+        )));
     }
 
-    info!("Classifier stdout: {}", stdout_buf);
+    info!(
+        "Classifier '{}' stdout: {}",
+        classifier_config.name, stdout_buf
+    );
 
     // Try to parse as ClassificationOutput
     match serde_json::from_str::<ClassificationOutput>(&stdout_buf) {
@@ -191,8 +184,8 @@ async fn run_classifier(
                 Ok(output)
             } else {
                 Err(ProcessorError::ClassifierError(format!(
-                    "Classifier returned non-classified result: {}",
-                    output.result
+                    "Classifier '{}' returned non-classified result: {}",
+                    classifier_config.name, output.result
                 )))
             }
         }
@@ -202,15 +195,15 @@ async fn run_classifier(
                 dns_smart_block_classifier::output::ErrorOutput,
             >(&stdout_buf)
             {
-                Ok(error_output) => Err(ProcessorError::ClassifierError(
-                    format!(
-                        "{}: {}",
-                        error_output.error.error_type, error_output.error.message
-                    ),
-                )),
+                Ok(error_output) => Err(ProcessorError::ClassifierError(format!(
+                    "Classifier '{}': {}: {}",
+                    classifier_config.name,
+                    error_output.error.error_type,
+                    error_output.error.message
+                ))),
                 Err(e) => Err(ProcessorError::ClassifierError(format!(
-                    "Failed to parse classifier output: {}. Output was: {}",
-                    e, stdout_buf
+                    "Classifier '{}': Failed to parse output: {}. Output was: {}",
+                    classifier_config.name, e, stdout_buf
                 ))),
             }
         }
@@ -219,139 +212,181 @@ async fn run_classifier(
 
 async fn process_domain(
     domain: &str,
-    args: &CliArgs,
+    config: &Config,
     pool: &PgPool,
-    prompt_template: &str,
+    classifier_path: &str,
 ) -> Result<()> {
     info!("Processing domain: {}", domain);
 
-    // Insert "classifying" event
-    db::insert_event(
-        pool,
-        domain,
-        "classifying",
-        json!({
-            "model": args.ollama_model,
-            "prompt_hash": compute_prompt_hash(prompt_template)
-        }),
-    )
-    .await?;
+    // Get all classifier states in a single query.
+    let classification_types: Vec<String> = config
+        .classifiers
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
 
-    // Run classifier
-    match run_classifier(domain, args).await {
-        Ok(output) => {
-            info!(
-                "Classification successful for {}: is_matching={}, confidence={}",
-                domain,
-                output.classification.is_matching_site,
-                output.classification.confidence
-            );
+    let states = db::get_classifier_states(pool, domain, &classification_types).await?;
 
-            // Insert "classified" event
-            db::insert_event(
-                pool,
-                domain,
-                "classified",
-                json!({
-                    "is_matching_site": output.classification.is_matching_site,
-                    "confidence": output.classification.confidence,
-                    "classification_type": args.classification_type,
-                    "http_status": output.metadata.http_status,
-                }),
-            )
-            .await?;
+    // Process each classifier based on its state.
+    for (classification_type, state) in states {
+        let classifier_config = config
+            .classifiers
+            .iter()
+            .find(|c| c.name == classification_type)
+            .expect("Classifier config should exist for all classification types");
 
-            // Update projections if it's a matching site above threshold
-            if output.classification.is_matching_site
-                && output.classification.confidence >= args.min_confidence
-            {
+        match state {
+            ClassifierState::Current => {
                 info!(
-                    "Domain {} matches criteria, updating projections",
-                    domain
+                    "Skipping classifier '{}' for domain {}: classification is current",
+                    classification_type, domain
+                );
+                continue;
+            }
+            ClassifierState::Expired => {
+                info!(
+                    "Running classifier '{}' for domain {}: classification expired",
+                    classification_type, domain
+                );
+            }
+            ClassifierState::Error => {
+                info!(
+                    "Running classifier '{}' for domain {}: previous attempt failed",
+                    classification_type, domain
+                );
+            }
+            ClassifierState::Missing => {
+                info!(
+                    "Running classifier '{}' for domain {}: no classification exists",
+                    classification_type, domain
+                );
+            }
+        }
+
+        // Load prompt template for this classifier.
+        let prompt_template = match std::fs::read_to_string(&classifier_config.prompt_template) {
+            Ok(content) => content,
+            Err(e) => {
+                error!(
+                    "Failed to read prompt template for classifier '{}' from {:?}: {}",
+                    classifier_config.name, classifier_config.prompt_template, e
                 );
 
-                db::update_projections(
+                // Insert error event and continue to next classifier.
+                db::insert_event(
                     pool,
                     domain,
-                    &args.classification_type,
-                    output.classification.confidence,
-                    &args.ollama_model,
-                    prompt_template,
-                    &output.metadata.prompt_hash,
-                    args.ttl_days,
+                    "error",
+                    json!({
+                        "classification_type": classifier_config.name,
+                        "error": format!("Failed to read prompt template: {}", e),
+                    }),
+                )
+                .await?;
+                continue;
+            }
+        };
+
+        // Insert "classifying" event.
+        db::insert_event(
+            pool,
+            domain,
+            "classifying",
+            json!({
+                "classification_type": classifier_config.name,
+                "model": classifier_config.effective_ollama_model(&config.ollama),
+                "prompt_hash": compute_prompt_hash(&prompt_template),
+            }),
+        )
+        .await?;
+
+        // Run the classifier.
+        match run_classifier(domain, classifier_config, config, classifier_path).await
+        {
+            Ok(output) => {
+                info!(
+                    "Classifier '{}' successful for {}: is_matching={}, confidence={}",
+                    classifier_config.name,
+                    domain,
+                    output.classification.is_matching_site,
+                    output.classification.confidence
+                );
+
+                // Insert "classified" event.
+                db::insert_event(
+                    pool,
+                    domain,
+                    "classified",
+                    json!({
+                        "classification_type": classifier_config.name,
+                        "is_matching_site": output.classification.is_matching_site,
+                        "confidence": output.classification.confidence,
+                        "http_status": output.metadata.http_status,
+                    }),
                 )
                 .await?;
 
-                info!("Projections updated successfully for {}", domain);
-            } else {
-                info!(
-                    "Domain {} does not match criteria or below confidence threshold",
-                    domain
-                );
-            }
+                // Update projections if it's a matching site above threshold.
+                let min_confidence = classifier_config.effective_min_confidence(&config.defaults);
+                let ttl_days = classifier_config.effective_ttl_days(&config.defaults);
 
-            Ok(())
-        }
-        Err(e) => {
-            error!("Classification failed for {}: {}", domain, e);
+                if output.classification.is_matching_site
+                    && output.classification.confidence >= min_confidence
+                {
+                    info!(
+                        "Domain {} matches criteria for classifier '{}', updating projections",
+                        domain, classifier_config.name
+                    );
 
-            // Insert "error" event
-            db::insert_event(
-                pool,
-                domain,
-                "error",
-                json!({
-                    "error": e.to_string(),
-                }),
-            )
-            .await?;
+                    db::update_projections(
+                        pool,
+                        domain,
+                        &classifier_config.name,
+                        output.classification.confidence,
+                        &classifier_config.effective_ollama_model(&config.ollama),
+                        &prompt_template,
+                        &output.metadata.prompt_hash,
+                        ttl_days,
+                    )
+                    .await?;
 
-            // Determine if this is a permanent or transient error
-            let is_permanent_error = match &e {
-                ProcessorError::ClassifierError(msg) => {
-                    // Check if it's a DNS resolution error, invalid domain, or
-                    // other permanent failure
-                    msg.contains("dns_resolution_failed")
-                        || msg.contains("invalid_domain")
-                        || msg.contains("http_fetch_failed: 404")
-                        || msg.contains("http_fetch_failed: 403")
+                    info!(
+                        "Projections updated successfully for {} (classifier '{}')",
+                        domain, classifier_config.name
+                    );
+                } else {
+                    info!(
+                        "Domain {} does not match criteria or below confidence threshold for classifier '{}'",
+                        domain, classifier_config.name
+                    );
                 }
-                // Database and I/O errors are generally transient
-                ProcessorError::DatabaseError(_)
-                | ProcessorError::IoError(_)
-                | ProcessorError::SqlxError(_) => false,
-                // Other errors are considered transient
-                _ => false,
-            };
-
-            if is_permanent_error {
-                info!(
-                    "Permanent error for {}, will not retry: {}",
-                    domain, e
-                );
-                return Ok(());
             }
-
-            // Check consecutive failures
-            let consecutive_errors = db::count_consecutive_errors(pool, domain, 10).await?;
-
-            if consecutive_errors >= 3 {
-                warn!(
-                    "Domain {} has {} consecutive failures, will not retry",
-                    domain, consecutive_errors
+            Err(e) => {
+                error!(
+                    "Classifier '{}' failed for {}: {}",
+                    classifier_config.name, domain, e
                 );
-                // Don't retry - too many failures
-                Ok(())
-            } else {
-                info!(
-                    "Domain {} has {} consecutive failures, will retry",
-                    domain, consecutive_errors
-                );
-                // Propagate error to trigger NAK and retry
-                Err(e)
+
+                // Insert "error" event.
+                db::insert_event(
+                    pool,
+                    domain,
+                    "error",
+                    json!({
+                        "classification_type": classifier_config.name,
+                        "error": e.to_string(),
+                    }),
+                )
+                .await?;
+
+                // Continue to next classifier - we don't fail the whole domain
+                // processing just because one classifier failed. The error is
+                // recorded and will be retried on the next DNS query.
             }
         }
     }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -365,8 +400,22 @@ async fn main() -> Result<()> {
     info!("NATS URL: {}", args.nats_url);
     info!("NATS subject: {}", args.nats_subject);
     info!("Classifier path: {}", args.classifier_path);
-    info!("Ollama URL: {}", args.ollama_url);
-    info!("Ollama model: {}", args.ollama_model);
+    info!("Config file: {}", args.config_file.display());
+
+    // Load configuration file
+    info!("Loading configuration from {:?}", args.config_file);
+    let config = Config::from_file(&args.config_file)?;
+
+    info!("Configuration loaded successfully");
+    info!("Ollama URL: {}", config.ollama.url);
+    info!("Ollama model (default): {}", config.ollama.model);
+    info!("Number of classifiers: {}", config.classifiers.len());
+    for classifier in &config.classifiers {
+        info!(
+            "  - {} (prompt: {:?})",
+            classifier.name, classifier.prompt_template
+        );
+    }
 
     // Construct database URL with password if provided
     let database_url = construct_database_url(
@@ -375,19 +424,6 @@ async fn main() -> Result<()> {
     )?;
 
     info!("Database URL: {}", sanitize_database_url(&database_url));
-
-    // Load prompt template
-    let prompt_template = std::fs::read_to_string(&args.prompt_template)
-        .map_err(|e| {
-            error!(
-                "Failed to read prompt template from {:?}: {}",
-                args.prompt_template, e
-            );
-            e
-        })?;
-
-    info!("Loaded prompt template from {:?}", args.prompt_template);
-    info!("Prompt hash: {}", compute_prompt_hash(&prompt_template));
 
     // Connect to PostgreSQL
     info!("Connecting to PostgreSQL...");
@@ -410,9 +446,8 @@ async fn main() -> Result<()> {
     // Get JetStream context
     let jetstream = async_nats::jetstream::new(client);
 
-    // Create or get a durable consumer for this processor type
-    // Each processor type (gaming, video-streaming) gets its own consumer
-    let consumer_name = format!("dns-smart-block-{}", args.classification_type);
+    // Create or get a single durable consumer for all classifiers
+    let consumer_name = "dns-smart-block-queue-processor";
     info!("Creating JetStream consumer: {}", consumer_name);
 
     let stream = jetstream
@@ -422,9 +457,9 @@ async fn main() -> Result<()> {
 
     let consumer = stream
         .get_or_create_consumer(
-            &consumer_name,
+            consumer_name,
             async_nats::jetstream::consumer::pull::Config {
-                durable_name: Some(consumer_name.clone()),
+                durable_name: Some(consumer_name.to_string()),
                 ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
                 max_ack_pending: args.nats_max_ack_pending,
                 ..Default::default()
@@ -460,34 +495,30 @@ async fn main() -> Result<()> {
                     domain_msg.domain, domain_msg.timestamp
                 );
 
-                // Process the domain
-                match process_domain(
-                    &domain_msg.domain,
-                    &args,
-                    &pool,
-                    &prompt_template,
-                )
-                .await
+                // Process the domain (runs all needed classifiers).
+                // We always ACK the message regardless of success or failure.
+                // Errors are recorded in the database and will be retried on
+                // the next DNS query for this domain.
+                match process_domain(&domain_msg.domain, &config, &pool, &args.classifier_path)
+                    .await
                 {
                     Ok(_) => {
-                        // Acknowledge the message after successful processing
-                        if let Err(e) = message.ack().await {
-                            error!("Failed to acknowledge message: {}", e);
-                        }
+                        info!("Successfully processed domain: {}", domain_msg.domain);
                     }
                     Err(e) => {
                         error!("Error processing domain {}: {}", domain_msg.domain, e);
-                        // Don't acknowledge failed messages - they'll be redelivered
-                        if let Err(nak_err) = message.ack_with(async_nats::jetstream::AckKind::Nak(None)).await {
-                            error!("Failed to NAK message: {}", nak_err);
-                        }
                     }
+                }
+
+                // Always acknowledge the message.
+                if let Err(e) = message.ack().await {
+                    error!("Failed to acknowledge message: {}", e);
                 }
             }
             Err(e) => {
                 error!("Failed to deserialize message: {}", e);
                 warn!("Raw payload: {:?}", String::from_utf8_lossy(&payload));
-                // Acknowledge malformed messages so they don't get redelivered
+                // Acknowledge malformed messages so they don't get redelivered.
                 if let Err(ack_err) = message.ack().await {
                     error!("Failed to acknowledge malformed message: {}", ack_err);
                 }
