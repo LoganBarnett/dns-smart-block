@@ -109,28 +109,16 @@ in {
         description = "Enable built-in NATS server for dns-smart-block (recommended)";
       };
 
-      port = mkOption {
-        type = types.port;
-        default = 4222;
-        description = "NATS server port (change if you have another NATS instance)";
-      };
-
       url = mkOption {
         type = types.str;
-        default = "nats://localhost:${toString cfg.nats.port}";
-        description = "NATS server URL (override if using external NATS)";
+        default = "nats://localhost:4222";
+        description = "NATS server URL.  Override when pointing at an external NATS instance.";
       };
 
       subject = mkOption {
         type = types.str;
         default = "dns.smart-block.domains";
         description = "NATS subject for domain messages";
-      };
-
-      dataDir = mkOption {
-        type = types.path;
-        default = "/var/lib/dns-smart-block-nats";
-        description = "NATS data directory";
       };
 
       maxAckPending = mkOption {
@@ -416,6 +404,14 @@ in {
 
     users.groups.${serviceGroup} = {};
 
+    # NATS Service.  Only the minimal JetStream requirement is set here; all
+    # tuning (storage limits, monitoring ports, etc.) is left to the operator
+    # via services.nats.
+    services.nats = mkIf cfg.nats.enable {
+      enable = true;
+      jetstream = true;
+    };
+
     # PostgreSQL Service.
     services.postgresql = mkIf cfg.database.enable {
       enable = true;
@@ -433,9 +429,9 @@ in {
         description = "DNS Smart Block Queue Processor";
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ]
-                ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service"
+                ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service"
                 ++ lib.optional cfg.database.enable "postgresql.service";
-        wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service"
+        wants = lib.optional cfg.nats.enable "dns-smart-block-nats-init.service"
                 ++ lib.optional cfg.database.enable "postgresql.service";
         requires = lib.optional cfg.database.enable "postgresql.service";
 
@@ -482,12 +478,12 @@ in {
         wantedBy = [ "multi-user.target" ];
         after =
           [ "network.target" ]
-          ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service"
+          ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service"
           ++ lib.optional
             (lib.hasPrefix "cmd:journalctl" cfg.logProcessor.logSource)
             "systemd-journald.service"
         ;
-        wants = lib.optional cfg.nats.enable "dns-smart-block-nats.service";
+        wants = lib.optional cfg.nats.enable "dns-smart-block-nats-init.service";
 
         serviceConfig = {
           Type = "simple";
@@ -529,80 +525,42 @@ in {
         };
       };
 
-      # NATS Server Service.
-      dns-smart-block-nats = mkIf cfg.nats.enable (let
-        # Generate NATS configuration file for JetStream persistence.
-        natsConfig = pkgs.writeText "nats-server.conf" ''
-          # NATS Server Configuration for DNS Smart Block
-          port: ${toString cfg.nats.port}
-
-          # HTTP monitoring endpoint for metrics and stats.
-          http: 0.0.0.0:8222
-
-          # Enable JetStream for message persistence.
-          jetstream {
-            # Store JetStream data in the configured directory.
-            store_dir: "${cfg.nats.dataDir}"
-          }
-
-          # Define a stream for domain classification messages.
-          # This stream automatically persists all messages published to the subject,
-          # allowing clients to use basic pub/sub while getting durability.
-          #
-          # Note: Stream creation via config file requires NATS 2.10+.
-          # For older versions, streams must be created via nats CLI or API.
-        '';
-      in {
-        description = "NATS server for DNS Smart Block";
+      # Idempotently create the DNS_SMART_BLOCK JetStream stream after NATS
+      # starts.  The || true makes the command succeed even if the stream
+      # already exists, so this is safe to run on every activation.
+      dns-smart-block-nats-init = mkIf cfg.nats.enable {
+        description = "Initialize DNS Smart Block NATS stream";
         wantedBy = [ "multi-user.target" ];
-        after = [ "network.target" ];
-
+        after = [ "nats.service" ];
+        requires = [ "nats.service" ];
         serviceConfig = {
-          Type = "simple";
-          DynamicUser = true;
-          StateDirectory = "dns-smart-block-nats";
-          # Use configuration file to enable JetStream and configure streams.
-          ExecStart = ''
-            ${pkgs.nats-server}/bin/nats-server \
-               -c ${natsConfig}
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = pkgs.writeShellScript "dns-smart-block-nats-init" ''
+            ${pkgs.natscli}/bin/nats --server=${cfg.nats.url} stream add DNS_SMART_BLOCK \
+              --subjects="${cfg.nats.subject}" \
+              --storage=file \
+              --retention=limits \
+              --max-age=7d \
+              --dupe-window=2m \
+              --replicas=1 \
+              --defaults || true
           '';
-          Restart = "always";
-          RestartSec = "5s";
-          # Security hardening.
           NoNewPrivileges = true;
           PrivateTmp = true;
           ProtectSystem = "strict";
           ProtectHome = true;
-          ReadWritePaths = [ cfg.nats.dataDir ];
         };
-        # Stream must be created after server starts since config file
-        # stream definitions aren't supported in all NATS versions.
-        postStart = ''
-          # Wait for NATS server to be ready.
-          sleep 2
-
-          # Create JetStream stream for domain messages using nats CLI.
-          # This stream will persist all messages on the subject.
-          # --defaults flag accepts default values for all prompts (needed for non-interactive context).
-          ${pkgs.natscli}/bin/nats --server=nats://localhost:${toString cfg.nats.port} stream add DNS_SMART_BLOCK \
-            --subjects="${cfg.nats.subject}" \
-            --storage=file \
-            --retention=limits \
-            --max-age=7d \
-            --dupe-window=2m \
-            --replicas=1 \
-            --defaults || true
-        '';
-      });
+      };
       # Blocklist Server Service.
       dns-smart-block-blocklist-server = mkIf cfg.blocklistServer.enable {
         description = "DNS Smart Block Blocklist Server";
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ]
                 ++ lib.optional cfg.database.enable "postgresql.service"
-                ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service";
+                ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service";
         wants = lib.optional cfg.database.enable "postgresql.service"
-                ++ lib.optional cfg.nats.enable "dns-smart-block-nats.service";
+                ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service";
         requires = lib.optional cfg.database.enable "postgresql.service";
 
         serviceConfig = {
@@ -692,7 +650,7 @@ in {
     warnings =
       lib.optional
         (!cfg.nats.enable
-         && cfg.nats.url == "nats://localhost:${toString cfg.nats.port}")
+         && cfg.nats.url == "nats://localhost:4222")
         ''
           DNS Smart Block: Built-in NATS is disabled but no external NATS URL configured
         ''
