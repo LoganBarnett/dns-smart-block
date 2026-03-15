@@ -649,7 +649,7 @@ mod tests {
       1.0,
       "Manually reviewed: not a gaming site",
       admin_id,
-      30,
+      Some(30),
     )
     .await
     .expect("apply_admin_classification failed");
@@ -740,7 +740,7 @@ mod tests {
       0.99,
       "Definitely gaming",
       admin_id,
-      30,
+      Some(30),
     )
     .await
     .unwrap();
@@ -753,7 +753,7 @@ mod tests {
       0.99,
       "Definitely not gaming",
       admin_id,
-      30,
+      Some(30),
     )
     .await
     .unwrap();

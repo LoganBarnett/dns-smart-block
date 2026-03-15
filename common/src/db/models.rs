@@ -417,6 +417,30 @@ impl ClassificationSource {
     Ok(result.0)
   }
 
+  /// Get or create the singleton 'provisioned' source row.
+  /// All provisioned classifications share this one source record.
+  pub async fn ensure_provisioned(
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<i32, sqlx::Error> {
+    sqlx::query(
+      r#"
+      INSERT INTO classification_sources (source_type, created_at)
+      VALUES ('provisioned', NOW())
+      ON CONFLICT (source_type) WHERE source_type = 'provisioned' DO NOTHING
+      "#,
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    let result: (i32,) = sqlx::query_as(
+      "SELECT id FROM classification_sources WHERE source_type = 'provisioned'",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(result.0)
+  }
+
   /// Get or create a source record for the given exclude-rule pattern.
   /// `source_type` must be `"config_exclude_rule"` or `"manual_exclude_rule"`.
   /// Two classifications that matched the same pattern share one source row.

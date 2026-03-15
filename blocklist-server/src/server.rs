@@ -790,10 +790,43 @@ struct ClassifyRequest {
   confidence: f64,
   #[serde(default)]
   reasoning: String,
-  #[serde(default = "default_ttl_days")]
-  ttl_days: i64,
+  /// TTL in days.  Omit (or pass null) for a classification that never expires.
+  ttl_days: Option<i64>,
   #[serde(default = "default_classify_user_id")]
   user_id: i32,
+}
+
+async fn reconcile(
+  State(state): State<AppState>,
+  axum::Json(entries): axum::Json<Vec<db::ProvisionedEntry>>,
+) -> impl IntoResponse {
+  info!(
+    "Running provisioned classification reconcile: {} desired entries",
+    entries.len()
+  );
+
+  match db::reconcile_provisioned_classifications(&state.pool, &entries).await {
+    Ok(result) => {
+      info!(
+        "Reconcile complete: {} upserted, {} skipped, {} expired",
+        result.upserted, result.skipped, result.expired
+      );
+      (
+        StatusCode::OK,
+        format!(
+          "Reconcile complete: {} upserted, {} skipped, {} expired\n",
+          result.upserted, result.skipped, result.expired
+        ),
+      )
+    }
+    Err(e) => {
+      error!("Reconcile failed: {}", e);
+      (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Reconcile failed: {}\n", e),
+      )
+    }
+  }
 }
 
 async fn classify(
@@ -862,6 +895,7 @@ fn admin_router(state: AppState) -> Router {
   Router::new()
     .route("/classifications", get(get_classifications))
     .route("/classify", post(classify))
+    .route("/reconcile", post(reconcile))
     .route("/reprojection", post(reprojection))
     .route("/expire", post(expire))
     .route("/requeue", post(requeue))

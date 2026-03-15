@@ -200,6 +200,73 @@ in {
       };
     };
 
+    # Provisioned Classification Overrides
+    provisionedClassifications = mkOption {
+      type = types.listOf (types.submodule {
+        options = {
+          domain = mkOption {
+            type = types.str;
+            description = "Domain to classify (e.g. \"example.com\")";
+          };
+
+          classificationType = mkOption {
+            type = types.str;
+            description = "Classification category (e.g. \"gaming\")";
+          };
+
+          isMatchingSite = mkOption {
+            type = types.bool;
+            description = "Whether the domain matches the category.  Set to false to exclude a domain from blocking.";
+          };
+
+          confidence = mkOption {
+            type = types.float;
+            default = 1.0;
+            description = "Confidence score (0.0–1.0).  Defaults to 1.0 for declarative overrides.";
+          };
+
+          reasoning = mkOption {
+            type = types.str;
+            default = "";
+            description = "Human-readable reason for this classification.";
+          };
+
+          ttlDays = mkOption {
+            type = types.nullOr types.int;
+            default = null;
+            description = ''
+              TTL in days.  Defaults to null, meaning the classification never
+              expires — appropriate for declarative overrides that are managed
+              entirely through NixOS configuration.
+            '';
+          };
+        };
+      });
+      default = [];
+      example = [
+        {
+          domain = "internal.corp";
+          classificationType = "gaming";
+          isMatchingSite = false;
+          reasoning = "Internal corporate domain — never block.";
+        }
+      ];
+      description = ''
+        Declarative provisioned domain classifications managed by
+        <literal>dns-smart-block-cli domain reconcile</literal>.  On each
+        service start, the full desired set is reconciled against the database:
+        new entries are inserted, changed entries are updated, and any
+        previously-provisioned classifications no longer present here are
+        expired.
+
+        These use the <literal>provisioned</literal> source type and are kept
+        strictly separate from <literal>admin</literal>-sourced manual
+        classifications made via the CLI or UI — reconcile never touches those.
+
+        Values must not contain single-quote characters.
+      '';
+    };
+
     # Domain Exclusions
     excludeSuffixes = mkOption {
       type = types.listOf types.str;
@@ -299,6 +366,7 @@ in {
       log-processor = pkgs.dns-smart-block-log-processor;
       queue-processor = pkgs.dns-smart-block-queue-processor;
       blocklist-server = pkgs.dns-smart-block-blocklist-server;
+      cli = pkgs.dns-smart-block-cli;
     };
 
     # Static user for services to enable PostgreSQL peer authentication.
@@ -556,6 +624,57 @@ in {
           ProtectHome = true;
         };
       };
+      # Reconcile provisioned classifications after the blocklist server is up.
+      dns-smart-block-provisioned-classifications =
+        mkIf (cfg.blocklistServer.enable && cfg.provisionedClassifications != []) (let
+          adminUrl = "http://${cfg.blocklistServer.adminBindHost}:${toString cfg.blocklistServer.adminBindPort}";
+          publicHealthUrl = "http://127.0.0.1:${toString cfg.blocklistServer.publicBindPort}/health";
+
+          # Generate the JSON file in the Nix store; the CLI reads it and
+          # POSTs the full desired set to POST /reconcile.
+          provisionsFile = pkgs.writeText "dns-smart-block-provisioned.json" (
+            builtins.toJSON (map (mc:
+              { domain = mc.domain;
+                classification_type = mc.classificationType;
+                is_matching_site = mc.isMatchingSite;
+                confidence = mc.confidence;
+              } // lib.optionalAttrs (mc.reasoning != "") { reasoning = mc.reasoning; }
+            ) cfg.provisionedClassifications)
+          );
+        in {
+          description = "Reconcile provisioned DNS Smart Block classifications";
+          wantedBy = [ "multi-user.target" ];
+          after = [ "dns-smart-block-blocklist-server.service" ];
+          requires = [ "dns-smart-block-blocklist-server.service" ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = serviceUser;
+            Group = serviceGroup;
+
+            ExecStart = pkgs.writeShellScript "dns-smart-block-provisioned-classifications" ''
+              # Poll until the blocklist server's public health endpoint responds.
+              until ${pkgs.curl}/bin/curl -sf '${publicHealthUrl}' > /dev/null 2>&1; do
+                sleep 1
+              done
+              ${packages.cli}/bin/dns-smart-block-cli \
+                --admin-url '${adminUrl}' \
+                domain reconcile \
+                --file '${provisionsFile}'
+            '';
+
+            NoNewPrivileges = true;
+            PrivateTmp = true;
+            ProtectSystem = "strict";
+            ProtectHome = true;
+            ReadOnlyPaths = [ provisionsFile ];
+          };
+
+          environment = {
+            RUST_LOG = "info";
+          };
+        });
+
       # Blocklist Server Service.
       dns-smart-block-blocklist-server = mkIf cfg.blocklistServer.enable {
         description = "DNS Smart Block Blocklist Server";

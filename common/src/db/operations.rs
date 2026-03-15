@@ -1,6 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Row};
+use std::collections::{HashMap, HashSet};
 
 use super::error::DbError;
 use super::models::{
@@ -154,6 +156,13 @@ pub async fn apply_exclude_rule(
 /// `classified` event — all atomically in one transaction.
 ///
 /// Returns the `source_id` of the newly created admin source.
+/// Sentinel `valid_until` used when a classification should never expire.
+/// Approximately year 3026 — far enough to be "forever" without needing a
+/// nullable column or schema change.
+fn never_expires_at(now: DateTime<Utc>) -> DateTime<Utc> {
+  now + Duration::days(365_000)
+}
+
 pub async fn apply_admin_classification(
   pool: &PgPool,
   domain: &str,
@@ -162,7 +171,7 @@ pub async fn apply_admin_classification(
   confidence: f64,
   reasoning: &str,
   user_id: i32,
-  ttl_days: i64,
+  ttl_days: Option<i64>,
 ) -> Result<i32, DbError> {
   let mut tx = pool.begin().await?;
 
@@ -175,6 +184,10 @@ pub async fn apply_admin_classification(
   let source_id = ClassificationSource::insert_admin(user_id, &mut tx).await?;
 
   let now = Utc::now();
+  let valid_until = match ttl_days {
+    Some(d) => now + Duration::days(d),
+    None => never_expires_at(now),
+  };
 
   ClassificationInsert {
     domain: domain.to_string(),
@@ -183,7 +196,7 @@ pub async fn apply_admin_classification(
     confidence: confidence as f32,
     reasoning: Some(reasoning.to_string()),
     valid_on: now,
-    valid_until: now + Duration::days(ttl_days),
+    valid_until,
     model: "admin".to_string(),
     source_id: Some(source_id),
   }
@@ -207,6 +220,191 @@ pub async fn apply_admin_classification(
 
   tx.commit().await?;
   Ok(source_id)
+}
+
+/// A single desired provisioned classification entry, as declared in NixOS
+/// configuration and submitted via `dns-smart-block-cli domain reconcile`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionedEntry {
+  pub domain: String,
+  pub classification_type: String,
+  pub is_matching_site: bool,
+  pub confidence: f64,
+  pub reasoning: Option<String>,
+}
+
+/// Summary of what a reconcile run changed.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReconcileResult {
+  /// Entries that were inserted or updated.
+  pub upserted: usize,
+  /// Entries whose active row already matched — no write needed.
+  pub skipped: usize,
+  /// Previously-provisioned classifications removed from the declared set.
+  pub expired: usize,
+}
+
+/// Reconcile the `provisioned` classification source against a desired set.
+///
+/// - Entries in `desired` are upserted (insert new or expire-and-reinsert if
+///   values changed).  Unchanged active rows are skipped.
+/// - Active `provisioned` rows whose `(domain, classification_type)` is not
+///   in `desired` are expired and an `expired` event is written.
+/// - `admin`-sourced rows are never touched.
+pub async fn reconcile_provisioned_classifications(
+  pool: &PgPool,
+  desired: &[ProvisionedEntry],
+) -> Result<ReconcileResult, DbError> {
+  let mut tx = pool.begin().await?;
+  let now = Utc::now();
+
+  // Ensure the singleton provisioned source row exists.
+  let source_id = ClassificationSource::ensure_provisioned(&mut tx).await?;
+
+  // Collect all currently-active provisioned rows.
+  let active_rows = sqlx::query(
+    r#"
+    SELECT domain, classification_type, is_matching_site, confidence, reasoning
+    FROM domain_classifications
+    WHERE source_id = $1 AND valid_until > $2
+    "#,
+  )
+  .bind(source_id)
+  .bind(now)
+  .fetch_all(&mut *tx)
+  .await?;
+
+  // Build a lookup: (domain, classification_type) → (is_matching_site, confidence, reasoning)
+  let mut active_map: HashMap<(String, String), (bool, f32, Option<String>)> =
+    HashMap::new();
+  for row in &active_rows {
+    let domain: String = row.try_get("domain")?;
+    let ct: String = row.try_get("classification_type")?;
+    let is_matching: bool = row.try_get("is_matching_site")?;
+    let confidence: f32 = row.try_get("confidence")?;
+    let reasoning: Option<String> = row.try_get("reasoning")?;
+    active_map.insert((domain, ct), (is_matching, confidence, reasoning));
+  }
+
+  let desired_keys: HashSet<(String, String)> = desired
+    .iter()
+    .map(|e| (e.domain.clone(), e.classification_type.clone()))
+    .collect();
+
+  let mut upserted = 0usize;
+  let mut skipped = 0usize;
+
+  for entry in desired {
+    let key = (entry.domain.clone(), entry.classification_type.clone());
+
+    // Skip if the active row already matches desired values.
+    if let Some(&(existing_matching, existing_conf, ref existing_reasoning)) =
+      active_map.get(&key)
+    {
+      let same_values = existing_matching == entry.is_matching_site
+        && (existing_conf - entry.confidence as f32).abs() < 0.0001
+        && existing_reasoning.as_deref().unwrap_or("")
+          == entry.reasoning.as_deref().unwrap_or("");
+
+      if same_values {
+        skipped += 1;
+        continue;
+      }
+
+      // Values changed — expire the old row before inserting a fresh one.
+      sqlx::query(
+        r#"
+        UPDATE domain_classifications SET valid_until = $1
+        WHERE domain = $2 AND classification_type = $3
+          AND source_id = $4 AND valid_until > $1
+        "#,
+      )
+      .bind(now)
+      .bind(&entry.domain)
+      .bind(&entry.classification_type)
+      .bind(source_id)
+      .execute(&mut *tx)
+      .await?;
+    }
+
+    DomainUpsert {
+      domain: entry.domain.clone(),
+    }
+    .upsert(&mut tx)
+    .await?;
+
+    ClassificationInsert {
+      domain: entry.domain.clone(),
+      classification_type: entry.classification_type.clone(),
+      is_matching_site: entry.is_matching_site,
+      confidence: entry.confidence as f32,
+      reasoning: entry.reasoning.clone(),
+      valid_on: now,
+      valid_until: never_expires_at(now),
+      model: "provisioned".to_string(),
+      source_id: Some(source_id),
+    }
+    .insert(&mut tx)
+    .await?;
+
+    insert_event(
+      &mut *tx,
+      &entry.domain,
+      "classified",
+      json!({
+        "classification_type": entry.classification_type,
+        "is_matching_site": entry.is_matching_site,
+        "confidence": entry.confidence,
+        "reasoning": entry.reasoning.as_deref().unwrap_or(""),
+        "model": "provisioned",
+      }),
+      Some(source_id),
+    )
+    .await?;
+
+    upserted += 1;
+  }
+
+  // Expire any active provisioned rows that are no longer in the desired set.
+  let mut expired = 0usize;
+  for (domain, ct) in active_map.keys() {
+    if !desired_keys.contains(&(domain.clone(), ct.clone())) {
+      sqlx::query(
+        r#"
+        UPDATE domain_classifications SET valid_until = $1
+        WHERE domain = $2 AND classification_type = $3
+          AND source_id = $4 AND valid_until > $1
+        "#,
+      )
+      .bind(now)
+      .bind(domain)
+      .bind(ct)
+      .bind(source_id)
+      .execute(&mut *tx)
+      .await?;
+
+      insert_event(
+        &mut *tx,
+        domain,
+        "expired",
+        json!({
+          "classification_type": ct,
+          "reason": "removed from provisioned configuration",
+        }),
+        Some(source_id),
+      )
+      .await?;
+
+      expired += 1;
+    }
+  }
+
+  tx.commit().await?;
+  Ok(ReconcileResult {
+    upserted,
+    skipped,
+    expired,
+  })
 }
 
 /// Rebuild the `domain_classifications` projection from the event log.
