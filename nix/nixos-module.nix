@@ -167,7 +167,7 @@ in {
     queueProcessor = {
       httpTimeoutSec = mkOption {
         type = types.int;
-        default = 10;
+        default = 120;
         description = "Default HTTP timeout for fetching domains (seconds)";
       };
 
