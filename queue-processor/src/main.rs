@@ -345,6 +345,7 @@ async fn process_domain(
                         domain,
                         &classifier_config.name,
                         output.classification.confidence,
+                        &output.classification.reasoning,
                         &classifier_config.effective_ollama_model(&config.ollama),
                         &prompt_template,
                         &output.metadata.prompt_hash,

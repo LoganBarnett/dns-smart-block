@@ -158,6 +158,7 @@ pub async fn insert_classification(
     domain: &str,
     classification_type: &str,
     confidence: f32,
+    reasoning: &str,
     model: &str,
     prompt_id: i32,
     ttl_days: i64,
@@ -168,14 +169,15 @@ pub async fn insert_classification(
     sqlx::query(
         r#"
         INSERT INTO domain_classifications (
-            domain, classification_type, confidence, valid_on, valid_until, model, prompt_id, created_at
+            domain, classification_type, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
         "#,
     )
     .bind(domain)
     .bind(classification_type)
     .bind(confidence)
+    .bind(reasoning)
     .bind(valid_on)
     .bind(valid_until)
     .bind(model)
@@ -192,6 +194,7 @@ pub async fn update_projections(
     domain: &str,
     classification_type: &str,
     confidence: f64,
+    reasoning: &str,
     model: &str,
     prompt_content: &str,
     prompt_hash: &str,
@@ -211,6 +214,7 @@ pub async fn update_projections(
         domain,
         classification_type,
         confidence as f32,
+        reasoning,
         model,
         prompt_id,
         ttl_days,

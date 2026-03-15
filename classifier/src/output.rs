@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct Classification {
     pub is_matching_site: bool,
     pub confidence: f64,
+    pub reasoning: String,
 }
 
 /// Metadata about the classification process
