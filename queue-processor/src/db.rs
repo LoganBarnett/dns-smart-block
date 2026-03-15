@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use dns_smart_block_common::db_models::ClassificationInsert;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use thiserror::Error;
 
@@ -154,40 +155,30 @@ pub async fn upsert_domain(
   Ok(())
 }
 
-/// Insert a domain classification
+/// Insert a domain classification using a typed struct
 pub async fn insert_classification(
   tx: &mut Transaction<'_, Postgres>,
-  domain: &str,
-  classification_type: &str,
-  is_matching_site: bool,
-  confidence: f32,
-  reasoning: &str,
-  model: &str,
-  prompt_id: Option<i32>,
-  ttl_days: i64,
+  classification: &ClassificationInsert,
 ) -> Result<(), DbError> {
-  let valid_on = Utc::now();
-  let valid_until = valid_on + Duration::days(ttl_days);
-
   sqlx::query(
-        r#"
+    r#"
         INSERT INTO domain_classifications (
             domain, classification_type, is_matching_site, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
         "#,
-    )
-    .bind(domain)
-    .bind(classification_type)
-    .bind(is_matching_site)
-    .bind(confidence)
-    .bind(reasoning)
-    .bind(valid_on)
-    .bind(valid_until)
-    .bind(model)
-    .bind(prompt_id)
-    .execute(&mut **tx)
-    .await?;
+  )
+  .bind(&classification.domain)
+  .bind(&classification.classification_type)
+  .bind(classification.is_matching_site)
+  .bind(classification.confidence)
+  .bind(&classification.reasoning)
+  .bind(classification.valid_on)
+  .bind(classification.valid_until)
+  .bind(&classification.model)
+  .bind(classification.prompt_id)
+  .execute(&mut **tx)
+  .await?;
 
   Ok(())
 }
@@ -214,18 +205,22 @@ pub async fn update_projections(
   upsert_domain(&mut tx, domain).await?;
 
   // Insert classification
-  insert_classification(
-    &mut tx,
-    domain,
-    classification_type,
+  let valid_on = Utc::now();
+  let valid_until = valid_on + Duration::days(ttl_days);
+
+  let classification = ClassificationInsert {
+    domain: domain.to_string(),
+    classification_type: classification_type.to_string(),
     is_matching_site,
-    confidence as f32,
-    reasoning,
-    model,
-    Some(prompt_id),
-    ttl_days,
-  )
-  .await?;
+    confidence: confidence as f32,
+    reasoning: Some(reasoning.to_string()),
+    valid_on,
+    valid_until,
+    model: model.to_string(),
+    prompt_id: Some(prompt_id),
+  };
+
+  insert_classification(&mut tx, &classification).await?;
 
   tx.commit().await?;
 

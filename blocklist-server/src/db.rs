@@ -1,4 +1,5 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use dns_smart_block_common::db_models::ClassificationInsert;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -386,9 +387,21 @@ pub async fn rebuild_projections_from_events(
 
     // Calculate validity window based on event time
     let valid_on = event_created_at;
-    let valid_until = valid_on + chrono::Duration::days(ttl_days);
+    let valid_until = valid_on + Duration::days(ttl_days);
 
-    // Insert projection with full event data
+    // Insert projection with full event data using typed struct
+    let classification = ClassificationInsert {
+      domain,
+      classification_type,
+      is_matching_site,
+      confidence,
+      reasoning,
+      valid_on,
+      valid_until,
+      model,
+      prompt_id,
+    };
+
     sqlx::query(
       r#"
             INSERT INTO domain_classifications (
@@ -398,15 +411,15 @@ pub async fn rebuild_projections_from_events(
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
     )
-    .bind(&domain)
-    .bind(&classification_type)
-    .bind(is_matching_site)
-    .bind(confidence)
-    .bind(&reasoning)
-    .bind(valid_on)
-    .bind(valid_until)
-    .bind(&model)
-    .bind(prompt_id)
+    .bind(&classification.domain)
+    .bind(&classification.classification_type)
+    .bind(classification.is_matching_site)
+    .bind(classification.confidence)
+    .bind(&classification.reasoning)
+    .bind(classification.valid_on)
+    .bind(classification.valid_until)
+    .bind(&classification.model)
+    .bind(classification.prompt_id)
     .bind(event_created_at)
     .execute(&mut *tx)
     .await?;
