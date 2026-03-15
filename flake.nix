@@ -29,6 +29,8 @@
       };
     in [
       pkgs.cargo-sweep
+      pkgs.elmPackages.elm
+      pkgs.elmPackages.elm-format
       pkgs.jq
       # Doesn't build on my system presently (what?).
       # pkgs.ollama

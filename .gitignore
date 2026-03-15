@@ -11,3 +11,6 @@ target/
 
 # Ignore test PostgreSQL data directory.
 test-postgres-data/
+
+# Ignore Elm build artifacts.
+elm-stuff/

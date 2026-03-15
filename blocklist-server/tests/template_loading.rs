@@ -8,23 +8,7 @@
 // missing or cannot be read.
 use dns_smart_block_blocklist_server::CLASSIFICATIONS_CSS;
 use dns_smart_block_blocklist_server::CLASSIFICATIONS_HTML;
-use dns_smart_block_blocklist_server::CLASSIFICATIONS_JS;
-
-#[test]
-fn test_template_contains_placeholders() {
-  assert!(
-    CLASSIFICATIONS_HTML.contains("{{FILTER_INFO}}"),
-    "Template should contain {{{{FILTER_INFO}}}} placeholder."
-  );
-  assert!(
-    CLASSIFICATIONS_HTML.contains("{{COUNT}}"),
-    "Template should contain {{{{COUNT}}}} placeholder."
-  );
-  assert!(
-    CLASSIFICATIONS_HTML.contains("{{ROWS}}"),
-    "Template should contain {{{{ROWS}}}} placeholder."
-  );
-}
+use dns_smart_block_blocklist_server::ELM_JS;
 
 #[test]
 fn test_template_references_static_assets() {
@@ -33,8 +17,20 @@ fn test_template_references_static_assets() {
     "Template should reference the embedded CSS asset."
   );
   assert!(
-    CLASSIFICATIONS_HTML.contains("/static/classifications.js"),
-    "Template should reference the embedded JS asset."
+    CLASSIFICATIONS_HTML.contains("/static/elm.js"),
+    "Template should reference the Elm JS asset."
+  );
+}
+
+#[test]
+fn test_template_mounts_elm() {
+  assert!(
+    CLASSIFICATIONS_HTML.contains("Elm.Main.init"),
+    "Template should initialize the Elm app."
+  );
+  assert!(
+    CLASSIFICATIONS_HTML.contains("id=\"app\""),
+    "Template should contain the Elm mount point."
   );
 }
 
@@ -44,43 +40,15 @@ fn test_static_assets_non_empty() {
     !CLASSIFICATIONS_CSS.is_empty(),
     "Embedded CSS should not be empty."
   );
-  assert!(
-    !CLASSIFICATIONS_JS.is_empty(),
-    "Embedded JS should not be empty."
-  );
+  assert!(!ELM_JS.is_empty(), "Embedded Elm JS should not be empty.");
 }
 
 #[test]
 fn test_static_assets_content() {
   let css = std::str::from_utf8(CLASSIFICATIONS_CSS)
     .expect("CSS should be valid UTF-8.");
-  let js =
-    std::str::from_utf8(CLASSIFICATIONS_JS).expect("JS should be valid UTF-8.");
+  let js = std::str::from_utf8(ELM_JS).expect("Elm JS should be valid UTF-8.");
 
   assert!(css.contains("body"), "CSS should contain body styles.");
-  assert!(
-    js.contains("sortTable"),
-    "JS should contain sortTable function."
-  );
-  assert!(
-    js.contains("expireDomain"),
-    "JS should contain expireDomain function."
-  );
-}
-
-#[test]
-fn test_template_substitution() {
-  let result = CLASSIFICATIONS_HTML
-    .replace("{{FILTER_INFO}}", " - Test Filter")
-    .replace("{{COUNT}}", "42")
-    .replace("{{ROWS}}", "<tr><td>test</td></tr>");
-
-  assert!(
-    result.contains("Total: 42 classification(s)"),
-    "Template should render count correctly."
-  );
-  assert!(
-    result.contains("<tr><td>test</td></tr>"),
-    "Template should render rows correctly."
-  );
+  assert!(js.contains("Elm"), "Elm JS should contain the Elm runtime.");
 }
