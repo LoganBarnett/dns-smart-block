@@ -15,11 +15,19 @@ async fn main() {
     // Initialize logging with auto-detection and CLI overrides
     args.logging.init_tracing();
 
+    info!("========================================");
     info!("Starting DNS Smart Block Classifier");
-    info!("Domain: {}", args.domain);
-    info!("Ollama URL: {}", args.ollama_url);
-    info!("Ollama Model: {}", args.ollama_model);
-    info!("Output format: {}", args.output);
+    info!("========================================");
+    info!("Configuration:");
+    info!("  Domain: {}", args.domain);
+    info!("  Classification Type: {}", args.classification_type);
+    info!("  Ollama URL: {}", args.ollama_url);
+    info!("  Ollama Model: {}", args.ollama_model);
+    info!("  Prompt Template: {:?}", args.prompt_template);
+    info!("  HTTP Timeout: {}s", args.http_timeout_sec);
+    info!("  HTTP Max KB: {}", args.http_max_kb);
+    info!("  Output Format: {}", args.output);
+    info!("========================================");
 
     // Run classification and always produce output
     let result = run_classification(&args).await;
@@ -70,7 +78,11 @@ async fn main() {
 async fn run_classification(
     args: &CliArgs,
 ) -> Result<ClassificationOutput, ErrorOutput> {
+    use std::time::Instant;
+    let start_time = Instant::now();
+
     // Read prompt template
+    info!("Step 1/3: Reading prompt template...");
     let prompt_template = std::fs::read_to_string(&args.prompt_template).map_err(|e| {
         error!(
             "Failed to read prompt template from {:?}: {}",
@@ -89,12 +101,21 @@ async fn run_classification(
     })?;
 
     let prompt_hash = compute_prompt_hash(&prompt_template);
-    info!("Prompt hash: {}", prompt_hash);
+    info!("  Prompt template loaded (hash: {})", prompt_hash);
+    info!("  Prompt length: {} characters", prompt_template.len());
 
     // Fetch domain content (best-effort - continue even if it fails)
+    info!("Step 2/3: Fetching domain content from {}...", args.domain);
+    let fetch_start = Instant::now();
     let metadata = match fetch_domain(&args.domain, args.http_timeout_sec, args.http_max_kb).await
     {
         Ok((html, status)) => {
+            info!(
+                "  HTTP fetch succeeded: status={}, size={} bytes, elapsed={:.2}s",
+                status,
+                html.len(),
+                fetch_start.elapsed().as_secs_f64()
+            );
             // Successfully fetched - extract metadata from HTML
             extract_metadata(&args.domain, &html, status).unwrap_or_else(|e| {
                 error!("Failed to extract metadata from HTML: {}", e);
@@ -107,16 +128,27 @@ async fn run_classification(
             })
         }
         Err(e) => {
+            error!(
+                "  HTTP fetch failed after {:.2}s: {}",
+                fetch_start.elapsed().as_secs_f64(),
+                e
+            );
             // HTTP fetch failed - create minimal metadata with just domain name
-            error!("Failed to fetch domain (will classify anyway): {}", e);
             use dns_smart_block_classifier::web_classify::SiteMetadata;
             SiteMetadata::from_fetch_error(&args.domain, &e.to_string())
         }
     };
 
-    info!("Extracted metadata: {:#?}", metadata);
+    info!("  Extracted metadata:");
+    info!("    Title: {:?}", metadata.title);
+    info!("    Language: {:?}", metadata.language);
+    info!("    HTTP Status: {}", metadata.http_status);
 
     // Classify with LLM
+    info!("Step 3/3: Classifying with LLM...");
+    info!("  Calling Ollama API at {}", args.ollama_url);
+    info!("  Using model: {}", args.ollama_model);
+    let llm_start = Instant::now();
     let classification = classify_with_llm(
         &metadata,
         &args.ollama_url,
@@ -125,7 +157,11 @@ async fn run_classification(
     )
     .await
     .map_err(|e| {
-        error!("Failed to classify: {}", e);
+        error!(
+            "  LLM classification failed after {:.2}s: {}",
+            llm_start.elapsed().as_secs_f64(),
+            e
+        );
         ErrorOutput {
             domain: args.domain.clone(),
             result: "error".to_string(),
@@ -141,8 +177,16 @@ async fn run_classification(
     })?;
 
     info!(
-        "Classification complete: is_matching={}, confidence={}",
+        "  LLM classification succeeded in {:.2}s",
+        llm_start.elapsed().as_secs_f64()
+    );
+    info!(
+        "Classification Result: is_matching={}, confidence={:.2}",
         classification.is_matching_site, classification.confidence
+    );
+    info!(
+        "Total execution time: {:.2}s",
+        start_time.elapsed().as_secs_f64()
     );
 
     Ok(ClassificationOutput {
