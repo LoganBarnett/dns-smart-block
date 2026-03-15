@@ -4,7 +4,7 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use chrono::{DateTime, Utc};
@@ -20,7 +20,6 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -51,8 +50,26 @@ lazy_static! {
         &["classification_type"]
     ).unwrap();
 
+    static ref DOMAINS_CLASSIFIED_POSITIVE: IntGaugeVec = register_int_gauge_vec!(
+        Opts::new("dns_smart_block_domains_classified_positive", "Currently valid positive classifications by type"),
+        &["classification_type"]
+    ).unwrap();
+
+    static ref DOMAINS_CLASSIFIED_NEGATIVE: IntGaugeVec = register_int_gauge_vec!(
+        Opts::new("dns_smart_block_domains_classified_negative", "Currently valid negative classifications by type"),
+        &["classification_type"]
+    ).unwrap();
+
     static ref DOMAINS_CLASSIFIED_TOTAL_CURRENT: IntGauge = register_int_gauge!(
         "dns_smart_block_domains_classified_total", "Total currently valid classified domains (all types)"
+    ).unwrap();
+
+    static ref DOMAINS_CLASSIFIED_POSITIVE_TOTAL: IntGauge = register_int_gauge!(
+        "dns_smart_block_domains_classified_positive_total", "Total currently valid positive classifications"
+    ).unwrap();
+
+    static ref DOMAINS_CLASSIFIED_NEGATIVE_TOTAL: IntGauge = register_int_gauge!(
+        "dns_smart_block_domains_classified_negative_total", "Total currently valid negative classifications"
     ).unwrap();
 
     static ref DOMAINS_SEEN_TOTAL: IntGauge = register_int_gauge!(
@@ -188,8 +205,28 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
                     .set(*count);
             }
 
+            // Update positive classification counts by type.
+            for (classification_type, count) in &stats.current_positive_by_type {
+                DOMAINS_CLASSIFIED_POSITIVE
+                    .with_label_values(&[classification_type])
+                    .set(*count);
+            }
+
+            // Update negative classification counts by type.
+            for (classification_type, count) in &stats.current_negative_by_type {
+                DOMAINS_CLASSIFIED_NEGATIVE
+                    .with_label_values(&[classification_type])
+                    .set(*count);
+            }
+
             // Update total currently classified domains.
             DOMAINS_CLASSIFIED_TOTAL_CURRENT.set(stats.current_classifications_total);
+
+            // Update total positive classifications.
+            DOMAINS_CLASSIFIED_POSITIVE_TOTAL.set(stats.current_positive_total);
+
+            // Update total negative classifications.
+            DOMAINS_CLASSIFIED_NEGATIVE_TOTAL.set(stats.current_negative_total);
 
             // Update total unique domains seen.
             DOMAINS_SEEN_TOTAL.set(stats.domains_seen_total);
@@ -275,6 +312,40 @@ async fn get_classifications(
     }
 }
 
+#[derive(Deserialize)]
+struct ReprojectionParams {
+    #[serde(default = "default_ttl_days")]
+    ttl_days: i64,
+}
+
+fn default_ttl_days() -> i64 {
+    10
+}
+
+async fn reprojection(
+    State(state): State<AppState>,
+    Query(params): Query<ReprojectionParams>,
+) -> impl IntoResponse {
+    info!("Starting reprojection with TTL {} days", params.ttl_days);
+
+    match db::rebuild_projections_from_events(&state.pool, params.ttl_days).await {
+        Ok(count) => {
+            info!("Reprojection completed: {} classifications rebuilt", count);
+            (
+                StatusCode::OK,
+                format!("Reprojection completed: {} classifications rebuilt\n", count),
+            )
+        }
+        Err(e) => {
+            error!("Reprojection failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Reprojection failed: {}\n", e),
+            )
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = CliArgs::parse();
@@ -326,6 +397,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/blocklist", get(get_blocklist))
         .route("/classifications", get(get_classifications))
+        .route("/reprojection", post(reprojection))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
         .layer(TraceLayer::new_for_http())

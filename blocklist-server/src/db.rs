@@ -14,8 +14,16 @@ pub enum DbError {
 pub struct MetricsStats {
     /// Count of currently valid classifications per type.
     pub current_classifications_by_type: HashMap<String, i64>,
+    /// Count of currently valid positive classifications per type.
+    pub current_positive_by_type: HashMap<String, i64>,
+    /// Count of currently valid negative classifications per type.
+    pub current_negative_by_type: HashMap<String, i64>,
     /// Total count of currently valid classifications (all types).
     pub current_classifications_total: i64,
+    /// Total count of currently valid positive classifications.
+    pub current_positive_total: i64,
+    /// Total count of currently valid negative classifications.
+    pub current_negative_total: i64,
     /// Total unique domains ever seen.
     pub domains_seen_total: i64,
     /// Count of classification events by action type.
@@ -86,12 +94,76 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
         current_classifications_by_type.insert(classification_type, count);
     }
 
+    // Get currently valid positive classifications count by type.
+    let current_positive_rows = sqlx::query(
+        r#"
+        SELECT classification_type, COUNT(DISTINCT domain) as count
+        FROM domain_classifications
+        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
+        GROUP BY classification_type
+        "#,
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    let mut current_positive_by_type = HashMap::new();
+    for row in current_positive_rows {
+        let classification_type: String = row.try_get("classification_type")?;
+        let count: i64 = row.try_get("count")?;
+        current_positive_by_type.insert(classification_type, count);
+    }
+
+    // Get currently valid negative classifications count by type.
+    let current_negative_rows = sqlx::query(
+        r#"
+        SELECT classification_type, COUNT(DISTINCT domain) as count
+        FROM domain_classifications
+        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
+        GROUP BY classification_type
+        "#,
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+
+    let mut current_negative_by_type = HashMap::new();
+    for row in current_negative_rows {
+        let classification_type: String = row.try_get("classification_type")?;
+        let count: i64 = row.try_get("count")?;
+        current_negative_by_type.insert(classification_type, count);
+    }
+
     // Get total currently valid classifications.
     let current_total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(DISTINCT domain)
         FROM domain_classifications
         WHERE valid_on <= $1 AND valid_until > $1
+        "#,
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+
+    // Get total currently valid positive classifications.
+    let current_positive_total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT domain)
+        FROM domain_classifications
+        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
+        "#,
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+
+    // Get total currently valid negative classifications.
+    let current_negative_total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT domain)
+        FROM domain_classifications
+        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
         "#,
     )
     .bind(now)
@@ -147,7 +219,11 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
 
     Ok(MetricsStats {
         current_classifications_by_type,
+        current_positive_by_type,
+        current_negative_by_type,
         current_classifications_total: current_total,
+        current_positive_total,
+        current_negative_total,
         domains_seen_total,
         events_by_action,
         classifications_created_by_type,
@@ -243,6 +319,90 @@ pub async fn get_classifications(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(classifications)
+}
+
+/// Rebuild projections from classified events
+/// This processes all "classified" events and recreates the domain_classifications table
+pub async fn rebuild_projections_from_events(
+    pool: &PgPool,
+    ttl_days: i64,
+) -> Result<i64, DbError> {
+    // Get all most recent "classified" events per domain/classification_type
+    // Extract the classification details from the event data
+    let rows = sqlx::query(
+        r#"
+        WITH latest_classified_events AS (
+            SELECT DISTINCT ON (domain, (data->>'classification_type'))
+                domain,
+                data->>'classification_type' as classification_type,
+                (data->>'is_matching_site')::boolean as is_matching_site,
+                (data->>'confidence')::real as confidence,
+                created_at
+            FROM domain_classification_events
+            WHERE action = 'classified'
+            ORDER BY domain, (data->>'classification_type'), created_at DESC
+        )
+        SELECT
+            domain,
+            classification_type,
+            is_matching_site,
+            confidence,
+            created_at
+        FROM latest_classified_events
+        WHERE classification_type IS NOT NULL
+          AND is_matching_site IS NOT NULL
+          AND confidence IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut tx = pool.begin().await?;
+    let mut count = 0i64;
+
+    // Delete existing projections (we're rebuilding from scratch)
+    sqlx::query("DELETE FROM domain_classifications")
+        .execute(&mut *tx)
+        .await?;
+
+    // For each classified event, create a new projection
+    for row in rows {
+        let domain: String = row.try_get("domain")?;
+        let classification_type: String = row.try_get("classification_type")?;
+        let is_matching_site: bool = row.try_get("is_matching_site")?;
+        let confidence: f32 = row.try_get("confidence")?;
+        let event_created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
+
+        // Calculate validity window based on event time
+        let valid_on = event_created_at;
+        let valid_until = valid_on + chrono::Duration::days(ttl_days);
+
+        // Insert projection with minimal metadata (we don't have model/prompt info in events)
+        sqlx::query(
+            r#"
+            INSERT INTO domain_classifications (
+                domain, classification_type, is_matching_site, confidence,
+                reasoning, valid_on, valid_until, model, prompt_id, created_at
+            )
+            VALUES ($1, $2, $3, $4, NULL, $5, $6, 'unknown', NULL, $7)
+            "#,
+        )
+        .bind(&domain)
+        .bind(&classification_type)
+        .bind(is_matching_site)
+        .bind(confidence)
+        .bind(valid_on)
+        .bind(valid_until)
+        .bind(event_created_at)
+        .execute(&mut *tx)
+        .await?;
+
+        count += 1;
+    }
+
+    tx.commit().await?;
+
+    Ok(count)
 }
 
 #[cfg(test)]
