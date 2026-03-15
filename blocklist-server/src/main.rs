@@ -375,11 +375,7 @@ fn render_classifications_html(
         </tr>"#,
         html_escape(&c.domain),
         html_escape(&c.classification_type),
-        if c.is_matching_site {
-          "Yes"
-        } else {
-          "No"
-        },
+        if c.is_matching_site { "Yes" } else { "No" },
         c.confidence,
         html_escape(c.reasoning.as_deref().unwrap_or("")),
         html_escape(&c.model),
@@ -485,6 +481,16 @@ fn render_classifications_html(
       rows.sort((a, b) => {{
         let aValue = a.cells[columnIndex].textContent.trim();
         let bValue = b.cells[columnIndex].textContent.trim();
+
+        // Try to parse as date/time.
+        const aDate = new Date(aValue);
+        const bDate = new Date(bValue);
+
+        if (!isNaN(aDate.getTime()) && !isNaN(bDate.getTime())) {{
+          return newDirection === 'asc'
+            ? aDate.getTime() - bDate.getTime()
+            : bDate.getTime() - aDate.getTime();
+        }}
 
         // Try to parse as number.
         const aNum = parseFloat(aValue);
