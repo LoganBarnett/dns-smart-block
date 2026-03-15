@@ -543,10 +543,6 @@ in {
           jetstream {
             # Store JetStream data in the configured directory.
             store_dir: "${cfg.nats.dataDir}"
-
-            # Maximum storage size for JetStream (1GB).
-            max_memory_store: 1GB
-            max_file_store: 1GB
           }
 
           # Define a stream for domain classification messages.
@@ -592,11 +588,7 @@ in {
             --subjects="${cfg.nats.subject}" \
             --storage=file \
             --retention=limits \
-            --max-msgs=-1 \
-            --max-bytes=1GB \
             --max-age=7d \
-            --max-msg-size=1MB \
-            --discard=old \
             --dupe-window=2m \
             --replicas=1 \
             --defaults || true
