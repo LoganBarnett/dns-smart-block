@@ -17,16 +17,18 @@ pub async fn insert_event(
     domain: &str,
     action: &str,
     action_data: serde_json::Value,
+    prompt_id: Option<i32>,
 ) -> Result<(), DbError> {
     sqlx::query(
         r#"
-        INSERT INTO domain_classification_events (domain, action, action_data, created_at)
-        VALUES ($1, $2::classification_action, $3, NOW())
+        INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
+        VALUES ($1, $2::classification_action, $3, $4, NOW())
         "#,
     )
     .bind(domain)
     .bind(action)
     .bind(action_data)
+    .bind(prompt_id)
     .execute(pool)
     .await?;
 

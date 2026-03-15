@@ -337,6 +337,9 @@ pub async fn rebuild_projections_from_events(
                 action_data->>'classification_type' as classification_type,
                 (action_data->>'is_matching_site')::boolean as is_matching_site,
                 (action_data->>'confidence')::real as confidence,
+                action_data->>'reasoning' as reasoning,
+                action_data->>'model' as model,
+                prompt_id,
                 created_at
             FROM domain_classification_events
             WHERE action = 'classified'
@@ -347,6 +350,9 @@ pub async fn rebuild_projections_from_events(
             classification_type,
             is_matching_site,
             confidence,
+            reasoning,
+            model,
+            prompt_id,
             created_at
         FROM latest_classified_events
         WHERE classification_type IS NOT NULL
@@ -371,28 +377,34 @@ pub async fn rebuild_projections_from_events(
         let classification_type: String = row.try_get("classification_type")?;
         let is_matching_site: bool = row.try_get("is_matching_site")?;
         let confidence: f32 = row.try_get("confidence")?;
+        let reasoning: Option<String> = row.try_get("reasoning")?;
+        let model: Option<String> = row.try_get("model")?;
+        let prompt_id: Option<i32> = row.try_get("prompt_id")?;
         let event_created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
 
         // Calculate validity window based on event time
         let valid_on = event_created_at;
         let valid_until = valid_on + chrono::Duration::days(ttl_days);
 
-        // Insert projection with minimal metadata (we don't have model/prompt info in events)
+        // Insert projection with full event data
         sqlx::query(
             r#"
             INSERT INTO domain_classifications (
                 domain, classification_type, is_matching_site, confidence,
                 reasoning, valid_on, valid_until, model, prompt_id, created_at
             )
-            VALUES ($1, $2, $3, $4, NULL, $5, $6, 'unknown', NULL, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(&domain)
         .bind(&classification_type)
         .bind(is_matching_site)
         .bind(confidence)
+        .bind(&reasoning)
         .bind(valid_on)
         .bind(valid_until)
+        .bind(&model)
+        .bind(prompt_id)
         .bind(event_created_at)
         .execute(&mut *tx)
         .await?;

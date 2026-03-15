@@ -283,6 +283,7 @@ async fn process_domain(
                         "classification_type": classifier_config.name,
                         "error": format!("Failed to read prompt template: {}", e),
                     }),
+                    None,  // No prompt_id for error events
                 )
                 .await?;
                 continue;
@@ -299,6 +300,7 @@ async fn process_domain(
                 "model": classifier_config.effective_ollama_model(&config.ollama),
                 "prompt_hash": compute_prompt_hash(&prompt_template),
             }),
+            None,  // No prompt_id yet for "classifying" events (not finished)
         )
         .await?;
 
@@ -314,7 +316,16 @@ async fn process_domain(
                     output.classification.confidence
                 );
 
-                // Insert "classified" event.
+                // Insert "classified" event with full context for reprojection.
+                // Use a transaction to ensure prompt and store prompt_id reference.
+                let mut tx = pool.begin().await?;
+                let prompt_id = db::ensure_prompt(
+                    &mut tx,
+                    &prompt_template,
+                    &output.metadata.prompt_hash,
+                )
+                .await?;
+
                 db::insert_event(
                     pool,
                     domain,
@@ -323,10 +334,14 @@ async fn process_domain(
                         "classification_type": classifier_config.name,
                         "is_matching_site": output.classification.is_matching_site,
                         "confidence": output.classification.confidence,
+                        "reasoning": output.classification.reasoning,
                         "http_status": output.metadata.http_status,
+                        "model": classifier_config.effective_ollama_model(&config.ollama),
                     }),
+                    Some(prompt_id),
                 )
                 .await?;
+                tx.commit().await?;
 
                 // Update projections for ALL classifications (positive and negative).
                 // This allows /classifications endpoint to show everything, while
@@ -383,6 +398,7 @@ async fn process_domain(
                         "classification_type": classifier_config.name,
                         "error": e.to_string(),
                     }),
+                    None,  // No prompt_id for error events
                 )
                 .await?;
 
