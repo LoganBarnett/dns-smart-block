@@ -179,11 +179,17 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
       .fetch_one(pool)
       .await?;
 
-  // Get event counts by action type.
+  // Get current state counts by action type: for each domain, only the latest
+  // event counts. This reflects how many domains are currently in each state,
+  // not how many events of each type exist in the log.
   let events_by_action_rows = sqlx::query(
     r#"
         SELECT action::text as action, COUNT(*) as count
-        FROM domain_classification_events
+        FROM (
+          SELECT DISTINCT ON (domain) action
+          FROM domain_classification_events
+          ORDER BY domain, created_at DESC
+        ) latest
         GROUP BY action
         "#,
   )
@@ -911,5 +917,111 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(domain_count, 4);
+  }
+
+  // Helper to insert an event with an explicit timestamp offset from NOW().
+  async fn insert_event_at(
+    pool: &PgPool,
+    domain: &str,
+    action: &str,
+    seconds_ago: i64,
+  ) {
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
+      VALUES ($1, $2::classification_action, '{}'::jsonb, NULL, NOW() - ($3 * INTERVAL '1 second'))
+      "#,
+    )
+    .bind(domain)
+    .bind(action)
+    .bind(seconds_ago)
+    .execute(pool)
+    .await
+    .unwrap();
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_events_by_action_counts_latest_state_only() {
+    let (_db, pool) = setup_test_db().await;
+
+    // domain-a: classifying → error → classifying → classified
+    // Only "classified" (the latest) should be counted.
+    insert_event_at(&pool, "domain-a.com", "classifying", 30).await;
+    insert_event_at(&pool, "domain-a.com", "error", 20).await;
+    insert_event_at(&pool, "domain-a.com", "classifying", 10).await;
+    insert_event_at(&pool, "domain-a.com", "classified", 5).await;
+
+    let stats = get_metrics_stats(&pool).await.unwrap();
+
+    assert_eq!(
+      stats
+        .events_by_action
+        .get("classified")
+        .copied()
+        .unwrap_or(0),
+      1
+    );
+    assert_eq!(
+      stats
+        .events_by_action
+        .get("classifying")
+        .copied()
+        .unwrap_or(0),
+      0
+    );
+    assert_eq!(stats.events_by_action.get("error").copied().unwrap_or(0), 0);
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_events_by_action_multiple_domains_mixed_states() {
+    let (_db, pool) = setup_test_db().await;
+
+    // domain-a: ended up classified
+    insert_event_at(&pool, "domain-a.com", "classifying", 20).await;
+    insert_event_at(&pool, "domain-a.com", "classified", 10).await;
+
+    // domain-b: ended up in error
+    insert_event_at(&pool, "domain-b.com", "classifying", 20).await;
+    insert_event_at(&pool, "domain-b.com", "error", 10).await;
+
+    // domain-c: still classifying
+    insert_event_at(&pool, "domain-c.com", "classifying", 5).await;
+
+    let stats = get_metrics_stats(&pool).await.unwrap();
+
+    assert_eq!(
+      stats
+        .events_by_action
+        .get("classified")
+        .copied()
+        .unwrap_or(0),
+      1
+    );
+    assert_eq!(stats.events_by_action.get("error").copied().unwrap_or(0), 1);
+    assert_eq!(
+      stats
+        .events_by_action
+        .get("classifying")
+        .copied()
+        .unwrap_or(0),
+      1
+    );
+    // "queued" is no longer written anywhere; should never appear
+    assert_eq!(
+      stats.events_by_action.get("queued").copied().unwrap_or(0),
+      0
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_events_by_action_empty_table() {
+    let (_db, pool) = setup_test_db().await;
+
+    let stats = get_metrics_stats(&pool).await.unwrap();
+
+    assert!(stats.events_by_action.is_empty());
   }
 }
