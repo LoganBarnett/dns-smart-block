@@ -675,4 +675,205 @@ mod tests {
     assert_eq!(domains_future.len(), 1);
     assert!(domains_future.contains(&"future.com".to_string()));
   }
+
+  #[tokio::test]
+  #[ignore] // Requires DATABASE_URL
+  async fn test_rebuild_projections_from_events() {
+    let pool = setup_test_db().await;
+
+    // Clean events table
+    sqlx::query("DELETE FROM domain_classification_events")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean events");
+
+    // Insert test prompts
+    sqlx::query(
+      r#"
+            INSERT INTO prompts (id, content, hash, created_at)
+            VALUES (1, 'test prompt 1', 'sha256:test1', NOW())
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+      r#"
+            INSERT INTO prompts (id, content, hash, created_at)
+            VALUES (2, 'test prompt 2', 'sha256:test2', NOW())
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert older classified event WITHOUT model field (simulating legacy event)
+    sqlx::query(
+      r#"
+            INSERT INTO domain_classification_events (
+                domain, action, action_data, prompt_id, created_at
+            )
+            VALUES (
+                'old-domain.com',
+                'classified',
+                '{"classification_type": "gaming", "is_matching_site": true, "confidence": 0.9, "reasoning": "Old event without model"}',
+                1,
+                NOW() - INTERVAL '2 days'
+            )
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert newer classified event WITH model field
+    sqlx::query(
+      r#"
+            INSERT INTO domain_classification_events (
+                domain, action, action_data, prompt_id, created_at
+            )
+            VALUES (
+                'new-domain.com',
+                'classified',
+                '{"classification_type": "gaming", "is_matching_site": true, "confidence": 0.85, "reasoning": "New event with model", "model": "test-model-v1"}',
+                2,
+                NOW() - INTERVAL '1 day'
+            )
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert negative classification event
+    sqlx::query(
+      r#"
+            INSERT INTO domain_classification_events (
+                domain, action, action_data, prompt_id, created_at
+            )
+            VALUES (
+                'non-gaming.com',
+                'classified',
+                '{"classification_type": "gaming", "is_matching_site": false, "confidence": 0.95, "reasoning": "Not a gaming site", "model": "test-model-v1"}',
+                2,
+                NOW() - INTERVAL '1 day'
+            )
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert multiple events for same domain (should take latest)
+    sqlx::query(
+      r#"
+            INSERT INTO domain_classification_events (
+                domain, action, action_data, prompt_id, created_at
+            )
+            VALUES (
+                'updated-domain.com',
+                'classified',
+                '{"classification_type": "gaming", "is_matching_site": true, "confidence": 0.7, "reasoning": "First classification", "model": "test-model-v1"}',
+                1,
+                NOW() - INTERVAL '3 days'
+            )
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+      r#"
+            INSERT INTO domain_classification_events (
+                domain, action, action_data, prompt_id, created_at
+            )
+            VALUES (
+                'updated-domain.com',
+                'classified',
+                '{"classification_type": "gaming", "is_matching_site": false, "confidence": 0.92, "reasoning": "Updated classification", "model": "test-model-v2"}',
+                2,
+                NOW() - INTERVAL '1 day'
+            )
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Rebuild projections
+    let count = rebuild_projections_from_events(&pool, 7).await.unwrap();
+    assert_eq!(count, 4); // Should create 4 projections
+
+    // Verify old event without model got 'unknown' as model
+    let old_classification: (String, bool, f32, String) = sqlx::query_as(
+      r#"
+            SELECT model, is_matching_site, confidence, reasoning
+            FROM domain_classifications
+            WHERE domain = 'old-domain.com' AND classification_type = 'gaming'
+            "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_classification.0, "unknown");
+    assert_eq!(old_classification.1, true);
+    assert_eq!(old_classification.2, 0.9);
+    assert_eq!(old_classification.3, "Old event without model");
+
+    // Verify new event with model preserved the model value
+    let new_classification: (String, bool, f32, String) = sqlx::query_as(
+      r#"
+            SELECT model, is_matching_site, confidence, reasoning
+            FROM domain_classifications
+            WHERE domain = 'new-domain.com' AND classification_type = 'gaming'
+            "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(new_classification.0, "test-model-v1");
+    assert_eq!(new_classification.1, true);
+    assert_eq!(new_classification.2, 0.85);
+    assert_eq!(new_classification.3, "New event with model");
+
+    // Verify negative classification was created
+    let negative_classification: (bool, f32) = sqlx::query_as(
+      r#"
+            SELECT is_matching_site, confidence
+            FROM domain_classifications
+            WHERE domain = 'non-gaming.com' AND classification_type = 'gaming'
+            "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(negative_classification.0, false);
+    assert_eq!(negative_classification.1, 0.95);
+
+    // Verify updated domain used latest event
+    let updated_classification: (bool, f32, String, String) = sqlx::query_as(
+      r#"
+            SELECT is_matching_site, confidence, reasoning, model
+            FROM domain_classifications
+            WHERE domain = 'updated-domain.com' AND classification_type = 'gaming'
+            "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(updated_classification.0, false); // Latest is negative
+    assert_eq!(updated_classification.1, 0.92);
+    assert_eq!(updated_classification.2, "Updated classification");
+    assert_eq!(updated_classification.3, "test-model-v2");
+
+    // Verify domains table was populated
+    let domain_count: i64 =
+      sqlx::query_scalar("SELECT COUNT(*) FROM domains")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(domain_count, 4);
+  }
 }
