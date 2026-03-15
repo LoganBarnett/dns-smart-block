@@ -15,13 +15,14 @@ use dns_smart_block_blocklist_server::{
 };
 use dns_smart_block_common::logging::LoggingArgs;
 use lazy_static::lazy_static;
+use prometheus::register_gauge_vec;
 use prometheus::register_int_counter;
 use prometheus::register_int_counter_vec;
 use prometheus::register_int_gauge;
 use prometheus::register_int_gauge_vec;
 use prometheus::{
-  Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-  TextEncoder,
+  Encoder, GaugeVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+  Registry, TextEncoder,
 };
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -37,6 +38,14 @@ lazy_static! {
     static ref BLOCKLIST_REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
         Opts::new("dns_smart_block_blocklist_requests_total", "Total number of blocklist requests"),
         &["classification_type", "status"]
+    ).unwrap();
+
+    static ref BLOCKLIST_LAST_REQUEST_TIMESTAMP: GaugeVec = register_gauge_vec!(
+        Opts::new(
+            "dns_smart_block_last_blocklist_request_timestamp_seconds",
+            "Unix timestamp of the most recent successful blocklist request by type",
+        ),
+        &["classification_type"]
     ).unwrap();
 
     static ref BLOCKLIST_DOMAINS_COUNT: IntGauge = register_int_gauge!(
@@ -190,6 +199,9 @@ async fn get_blocklist(
       BLOCKLIST_REQUESTS_TOTAL
         .with_label_values(&[params.classification_type.as_str(), "success"])
         .inc();
+      BLOCKLIST_LAST_REQUEST_TIMESTAMP
+        .with_label_values(&[params.classification_type.as_str()])
+        .set(Utc::now().timestamp() as f64);
       BLOCKLIST_DOMAINS_COUNT.set(domains.len() as i64);
 
       // Return as plain text, one domain per line.
