@@ -1,10 +1,11 @@
 use dns_smart_block_classifier::{
-    classify_with_llm, output::Classification, web_classify::SiteMetadata, OllamaResponse,
+  classify_with_llm, output::Classification, web_classify::SiteMetadata,
+  OllamaResponse,
 };
 use serde_json::json;
 use wiremock::{
-    matchers::{body_partial_json, method, path},
-    Mock, MockServer, ResponseTemplate,
+  matchers::{body_partial_json, method, path},
+  Mock, MockServer, ResponseTemplate,
 };
 
 /// Sample HTML content for a gaming site (Steam-like)
@@ -50,7 +51,7 @@ Respond ONLY with valid JSON in this exact format:
 
 /// Helper function to create a SiteMetadata for a gaming site
 fn create_gaming_site_metadata() -> SiteMetadata {
-    SiteMetadata {
+  SiteMetadata {
         domain: "awesomegames.example".to_string(),
         title: Some("Awesome Game Store - Buy and Download PC Games".to_string()),
         description: Some(
@@ -71,140 +72,146 @@ fn create_gaming_site_metadata() -> SiteMetadata {
 
 #[tokio::test]
 async fn test_classify_gaming_site_with_mock_ollama() {
-    // Set up the mock Ollama server
-    let mock_server = MockServer::start().await;
+  // Set up the mock Ollama server
+  let mock_server = MockServer::start().await;
 
-    // Create the expected classification result
-    let expected_result = Classification {
-        is_matching_site: true,
-        confidence: 0.95,
-    };
+  // Create the expected classification result
+  let expected_result = Classification {
+    is_matching_site: true,
+    confidence: 0.95,
+  };
 
-    // Set up the mock response for the Ollama API
-    let ollama_response = OllamaResponse {
-        response: json!({
-            "is_matching_site": true,
-            "confidence": 0.95
-        })
-        .to_string(),
-    };
+  // Set up the mock response for the Ollama API
+  let ollama_response = OllamaResponse {
+    response: json!({
+        "is_matching_site": true,
+        "confidence": 0.95
+    })
+    .to_string(),
+  };
 
-    Mock::given(method("POST"))
-        .and(path("/api/generate"))
-        .and(body_partial_json(json!({
-            "format": "json",
-            "stream": false
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&ollama_response))
-        .mount(&mock_server)
-        .await;
+  Mock::given(method("POST"))
+    .and(path("/api/generate"))
+    .and(body_partial_json(json!({
+        "format": "json",
+        "stream": false
+    })))
+    .respond_with(ResponseTemplate::new(200).set_body_json(&ollama_response))
+    .mount(&mock_server)
+    .await;
 
-    // Create test metadata for a gaming site
-    let metadata = create_gaming_site_metadata();
+  // Create test metadata for a gaming site
+  let metadata = create_gaming_site_metadata();
 
-    // Call the classification function
-    let result = classify_with_llm(
-        &metadata,
-        &mock_server.uri(),
-        "test-model",
-        GAMING_PROMPT_TEMPLATE,
-    )
-    .await
-    .expect("Classification should succeed");
+  // Call the classification function
+  let result = classify_with_llm(
+    &metadata,
+    &mock_server.uri(),
+    "test-model",
+    GAMING_PROMPT_TEMPLATE,
+  )
+  .await
+  .expect("Classification should succeed");
 
-    // Assert the result
-    assert_eq!(result, expected_result);
-    assert!(result.is_matching_site);
-    assert!(result.confidence > 0.9);
+  // Assert the result
+  assert_eq!(result, expected_result);
+  assert!(result.is_matching_site);
+  assert!(result.confidence > 0.9);
 }
 
 #[tokio::test]
 async fn test_classify_non_gaming_site_with_mock_ollama() {
-    // Set up the mock Ollama server
-    let mock_server = MockServer::start().await;
+  // Set up the mock Ollama server
+  let mock_server = MockServer::start().await;
 
-    // Create a non-gaming site metadata
-    let metadata = SiteMetadata {
-        domain: "newssite.example".to_string(),
-        title: Some("Daily News - Breaking News and Headlines".to_string()),
-        description: Some("Get the latest news and breaking headlines from around the world.".to_string()),
-        og_title: Some("Daily News".to_string()),
-        og_description: Some("Your trusted source for news and current events".to_string()),
-        og_site_name: Some("Daily News".to_string()),
-        language: Some("en".to_string()),
-        http_status: 200,
-        fetch_error: None,
-    };
-
-    // Set up the mock response for a non-gaming site
-    let ollama_response = OllamaResponse {
-        response: json!({
-            "is_matching_site": false,
-            "confidence": 0.98
-        })
+  // Create a non-gaming site metadata
+  let metadata = SiteMetadata {
+    domain: "newssite.example".to_string(),
+    title: Some("Daily News - Breaking News and Headlines".to_string()),
+    description: Some(
+      "Get the latest news and breaking headlines from around the world."
         .to_string(),
-    };
+    ),
+    og_title: Some("Daily News".to_string()),
+    og_description: Some(
+      "Your trusted source for news and current events".to_string(),
+    ),
+    og_site_name: Some("Daily News".to_string()),
+    language: Some("en".to_string()),
+    http_status: 200,
+    fetch_error: None,
+  };
 
-    Mock::given(method("POST"))
-        .and(path("/api/generate"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&ollama_response))
-        .mount(&mock_server)
-        .await;
+  // Set up the mock response for a non-gaming site
+  let ollama_response = OllamaResponse {
+    response: json!({
+        "is_matching_site": false,
+        "confidence": 0.98
+    })
+    .to_string(),
+  };
 
-    // Call the classification function
-    let result = classify_with_llm(
-        &metadata,
-        &mock_server.uri(),
-        "test-model",
-        GAMING_PROMPT_TEMPLATE,
-    )
-    .await
-    .expect("Classification should succeed");
+  Mock::given(method("POST"))
+    .and(path("/api/generate"))
+    .respond_with(ResponseTemplate::new(200).set_body_json(&ollama_response))
+    .mount(&mock_server)
+    .await;
 
-    // Assert the result
-    assert!(!result.is_matching_site);
-    assert!(result.confidence > 0.9);
+  // Call the classification function
+  let result = classify_with_llm(
+    &metadata,
+    &mock_server.uri(),
+    "test-model",
+    GAMING_PROMPT_TEMPLATE,
+  )
+  .await
+  .expect("Classification should succeed");
+
+  // Assert the result
+  assert!(!result.is_matching_site);
+  assert!(result.confidence > 0.9);
 }
 
 #[tokio::test]
 async fn test_ollama_api_error_handling() {
-    // Set up the mock Ollama server that returns an error
-    let mock_server = MockServer::start().await;
+  // Set up the mock Ollama server that returns an error
+  let mock_server = MockServer::start().await;
 
-    Mock::given(method("POST"))
-        .and(path("/api/generate"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&mock_server)
-        .await;
-
-    let metadata = create_gaming_site_metadata();
-
-    // Call the classification function and expect an error
-    let result = classify_with_llm(
-        &metadata,
-        &mock_server.uri(),
-        "test-model",
-        GAMING_PROMPT_TEMPLATE,
-    )
+  Mock::given(method("POST"))
+    .and(path("/api/generate"))
+    .respond_with(ResponseTemplate::new(500))
+    .mount(&mock_server)
     .await;
 
-    assert!(result.is_err());
+  let metadata = create_gaming_site_metadata();
+
+  // Call the classification function and expect an error
+  let result = classify_with_llm(
+    &metadata,
+    &mock_server.uri(),
+    "test-model",
+    GAMING_PROMPT_TEMPLATE,
+  )
+  .await;
+
+  assert!(result.is_err());
 }
 
 #[test]
 fn test_gaming_site_html_parsing() {
-    use dns_smart_block_classifier::web_classify::extract_metadata;
+  use dns_smart_block_classifier::web_classify::extract_metadata;
 
-    let metadata = extract_metadata("awesomegames.example", GAMING_SITE_HTML, 200)
-        .expect("Should extract metadata");
+  let metadata =
+    extract_metadata("awesomegames.example", GAMING_SITE_HTML, 200)
+      .expect("Should extract metadata");
 
-    assert_eq!(metadata.domain, "awesomegames.example");
-    assert!(metadata.title.is_some());
-    assert!(metadata
-        .title
-        .as_ref()
-        .unwrap()
-        .contains("Awesome Game Store"));
-    assert!(metadata.description.is_some());
-    assert_eq!(metadata.http_status, 200);
+  assert_eq!(metadata.domain, "awesomegames.example");
+  assert!(metadata.title.is_some());
+  assert!(metadata
+    .title
+    .as_ref()
+    .unwrap()
+    .contains("Awesome Game Store"));
+  assert!(metadata.description.is_some());
+  assert_eq!(metadata.http_status, 200);
 }

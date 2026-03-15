@@ -1,7 +1,12 @@
 use clap::Parser;
 use dns_smart_block_log_processor::{
-  ProcessorError, Result, cli_args::CliArgs, database_url::{construct_database_url, sanitize_database_url},
-  db, log_parser::LogParser, log_source::LogSource, queue::QueuePublisher,
+  cli_args::CliArgs,
+  database_url::{construct_database_url, sanitize_database_url},
+  db,
+  log_parser::LogParser,
+  log_source::LogSource,
+  queue::QueuePublisher,
+  ProcessorError, Result,
 };
 use futures::StreamExt;
 use sqlx::PgPool;
@@ -96,10 +101,7 @@ async fn main() -> Result<()> {
 
           // Insert queued event
           if let Err(e) = db::insert_queued_event(&pool, &domain).await {
-            error!(
-              "Failed to insert queued event for {}: {}",
-              domain, e
-            );
+            error!("Failed to insert queued event for {}: {}", domain, e);
             // Continue anyway - queue the domain
           }
 

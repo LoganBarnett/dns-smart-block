@@ -175,9 +175,15 @@ mod tests {
 
     // Typical Blocky log line
     let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved answer=A (13.107.213.69) client_ip=127.0.0.1 question_name=minecraft.net. question_type=A response_code=NOERROR";
-    assert_eq!(parser.parse_log_line(line), Some("minecraft.net".to_string()));
+    assert_eq!(
+      parser.parse_log_line(line),
+      Some("minecraft.net".to_string())
+    );
 
     let line = "[2026-02-04 20:33:21]  INFO queryLog: query resolved question_name=steampowered.com. question_type=A";
-    assert_eq!(parser.parse_log_line(line), Some("steampowered.com".to_string()));
+    assert_eq!(
+      parser.parse_log_line(line),
+      Some("steampowered.com".to_string())
+    );
   }
 }

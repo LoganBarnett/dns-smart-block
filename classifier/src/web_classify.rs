@@ -74,11 +74,7 @@ pub async fn fetch_domain(
   for attempt in 0..max_attempts {
     if attempt > 0 {
       let delay_ms = 500 * (1 << (attempt - 1)); // 500ms, 1000ms, 2000ms
-      warn!(
-        "Retry attempt {} after {}ms delay",
-        attempt + 1,
-        delay_ms
-      );
+      warn!("Retry attempt {} after {}ms delay", attempt + 1, delay_ms);
       tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 
@@ -115,11 +111,7 @@ pub async fn fetch_domain(
         return Ok((html, status));
       }
       Err(e) => {
-        warn!(
-          "HTTP request failed on attempt {}: {}",
-          attempt + 1,
-          e
-        );
+        warn!("HTTP request failed on attempt {}: {}", attempt + 1, e);
         last_error = Some(e);
       }
     }
@@ -165,10 +157,16 @@ pub fn extract_metadata(
     attr_from_css_selector(&document, "meta[name='description']", "content");
   let og_title =
     attr_from_css_selector(&document, "meta[property='og:title']", "content");
-  let og_description =
-    attr_from_css_selector(&document, "meta[property='og:description']", "content");
-  let og_site_name =
-    attr_from_css_selector(&document, "meta[property='og:site_name']", "content");
+  let og_description = attr_from_css_selector(
+    &document,
+    "meta[property='og:description']",
+    "content",
+  );
+  let og_site_name = attr_from_css_selector(
+    &document,
+    "meta[property='og:site_name']",
+    "content",
+  );
   let language = attr_from_css_selector(&document, "html", "lang");
   Ok(SiteMetadata {
     domain: domain.to_string(),
@@ -467,7 +465,8 @@ mod tests {
 
   #[test]
   fn test_site_metadata_from_fetch_error() {
-    let metadata = SiteMetadata::from_fetch_error("example.com", "Connection timeout");
+    let metadata =
+      SiteMetadata::from_fetch_error("example.com", "Connection timeout");
 
     assert_eq!(metadata.domain, "example.com");
     assert_eq!(metadata.title, None);
@@ -477,10 +476,7 @@ mod tests {
     assert_eq!(metadata.og_site_name, None);
     assert_eq!(metadata.language, None);
     assert_eq!(metadata.http_status, 0);
-    assert_eq!(
-      metadata.fetch_error,
-      Some("Connection timeout".to_string())
-    );
+    assert_eq!(metadata.fetch_error, Some("Connection timeout".to_string()));
   }
 
   #[test]

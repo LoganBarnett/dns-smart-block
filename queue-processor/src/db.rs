@@ -4,22 +4,22 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DbError {
-    #[error("Database error: {0}")]
-    SqlxError(#[from] sqlx::Error),
+  #[error("Database error: {0}")]
+  SqlxError(#[from] sqlx::Error),
 
-    #[error("JSON error: {0}")]
-    JsonError(#[from] serde_json::Error),
+  #[error("JSON error: {0}")]
+  JsonError(#[from] serde_json::Error),
 }
 
 /// Insert a domain_classification_event
 pub async fn insert_event(
-    pool: &PgPool,
-    domain: &str,
-    action: &str,
-    action_data: serde_json::Value,
-    prompt_id: Option<i32>,
+  pool: &PgPool,
+  domain: &str,
+  action: &str,
+  action_data: serde_json::Value,
+  prompt_id: Option<i32>,
 ) -> Result<(), DbError> {
-    sqlx::query(
+  sqlx::query(
         r#"
         INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
         VALUES ($1, $2::classification_action, $3, $4, NOW())
@@ -32,47 +32,47 @@ pub async fn insert_event(
     .execute(pool)
     .await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// Get the latest event for a domain
 pub async fn get_latest_event(
-    pool: &PgPool,
-    domain: &str,
+  pool: &PgPool,
+  domain: &str,
 ) -> Result<Option<(String, serde_json::Value)>, DbError> {
-    let result = sqlx::query(
-        r#"
+  let result = sqlx::query(
+    r#"
         SELECT action::text, action_data
         FROM domain_classification_events
         WHERE domain = $1
         ORDER BY created_at DESC
         LIMIT 1
         "#,
-    )
-    .bind(domain)
-    .fetch_optional(pool)
-    .await?;
+  )
+  .bind(domain)
+  .fetch_optional(pool)
+  .await?;
 
-    match result {
-        Some(row) => {
-            let action: String = row.try_get("action")?;
-            let action_data: serde_json::Value = row.try_get("action_data")?;
-            Ok(Some((action, action_data)))
-        }
-        None => Ok(None),
+  match result {
+    Some(row) => {
+      let action: String = row.try_get("action")?;
+      let action_data: serde_json::Value = row.try_get("action_data")?;
+      Ok(Some((action, action_data)))
     }
+    None => Ok(None),
+  }
 }
 
 /// Count consecutive "error" events for a domain.
 /// Returns the number of consecutive errors, starting from the most recent
 /// event.
 pub async fn count_consecutive_errors(
-    pool: &PgPool,
-    domain: &str,
-    limit: i64,
+  pool: &PgPool,
+  domain: &str,
+  limit: i64,
 ) -> Result<i64, DbError> {
-    let result = sqlx::query(
-        r#"
+  let result = sqlx::query(
+    r#"
         WITH recent_events AS (
             SELECT
                 action::text,
@@ -92,84 +92,84 @@ pub async fn count_consecutive_errors(
             AND re2.rn <= recent_events.rn
         )
         "#,
-    )
-    .bind(domain)
-    .bind(limit)
-    .fetch_one(pool)
-    .await?;
+  )
+  .bind(domain)
+  .bind(limit)
+  .fetch_one(pool)
+  .await?;
 
-    let count: i64 = result.try_get("error_count")?;
-    Ok(count)
+  let count: i64 = result.try_get("error_count")?;
+  Ok(count)
 }
 
 /// Ensure a prompt exists and return its ID
 pub async fn ensure_prompt(
-    tx: &mut Transaction<'_, Postgres>,
-    content: &str,
-    hash: &str,
+  tx: &mut Transaction<'_, Postgres>,
+  content: &str,
+  hash: &str,
 ) -> Result<i32, DbError> {
-    // Try to insert, ignore conflicts
-    sqlx::query(
-        r#"
+  // Try to insert, ignore conflicts
+  sqlx::query(
+    r#"
         INSERT INTO prompts (content, hash, created_at)
         VALUES ($1, $2, NOW())
         ON CONFLICT (hash) DO NOTHING
         "#,
-    )
-    .bind(content)
-    .bind(hash)
-    .execute(&mut **tx)
-    .await?;
+  )
+  .bind(content)
+  .bind(hash)
+  .execute(&mut **tx)
+  .await?;
 
-    // Get the ID
-    let result = sqlx::query(
-        r#"
+  // Get the ID
+  let result = sqlx::query(
+    r#"
         SELECT id FROM prompts WHERE hash = $1
         "#,
-    )
-    .bind(hash)
-    .fetch_one(&mut **tx)
-    .await?;
+  )
+  .bind(hash)
+  .fetch_one(&mut **tx)
+  .await?;
 
-    let id: i32 = result.try_get("id")?;
-    Ok(id)
+  let id: i32 = result.try_get("id")?;
+  Ok(id)
 }
 
 /// Upsert a domain in the domains table
 pub async fn upsert_domain(
-    tx: &mut Transaction<'_, Postgres>,
-    domain: &str,
+  tx: &mut Transaction<'_, Postgres>,
+  domain: &str,
 ) -> Result<(), DbError> {
-    sqlx::query(
-        r#"
+  sqlx::query(
+    r#"
         INSERT INTO domains (domain, last_updated)
         VALUES ($1, NOW())
         ON CONFLICT (domain) DO UPDATE SET last_updated = NOW()
         "#,
-    )
-    .bind(domain)
-    .execute(&mut **tx)
-    .await?;
+  )
+  .bind(domain)
+  .execute(&mut **tx)
+  .await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// Insert a domain classification
 pub async fn insert_classification(
-    tx: &mut Transaction<'_, Postgres>,
-    domain: &str,
-    classification_type: &str,
-    is_matching_site: bool,
-    confidence: f32,
-    reasoning: &str,
-    model: &str,
-    prompt_id: i32,
-    ttl_days: i64,
+  tx: &mut Transaction<'_, Postgres>,
+  domain: &str,
+  classification_type: &str,
+  is_matching_site: bool,
+  confidence: f32,
+  reasoning: &str,
+  model: &str,
+  prompt_id: i32,
+  ttl_days: i64,
 ) -> Result<(), DbError> {
-    let valid_on = Utc::now();
-    let valid_until = valid_on + Duration::days(ttl_days);
+  let valid_on = Utc::now();
+  let valid_until = valid_on + Duration::days(ttl_days);
 
-    sqlx::query(
+  sqlx::query(
         r#"
         INSERT INTO domain_classifications (
             domain, classification_type, is_matching_site, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
@@ -189,60 +189,60 @@ pub async fn insert_classification(
     .execute(&mut **tx)
     .await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// Update projections after a successful classification
 pub async fn update_projections(
-    pool: &PgPool,
-    domain: &str,
-    classification_type: &str,
-    is_matching_site: bool,
-    confidence: f64,
-    reasoning: &str,
-    model: &str,
-    prompt_content: &str,
-    prompt_hash: &str,
-    ttl_days: i64,
+  pool: &PgPool,
+  domain: &str,
+  classification_type: &str,
+  is_matching_site: bool,
+  confidence: f64,
+  reasoning: &str,
+  model: &str,
+  prompt_content: &str,
+  prompt_hash: &str,
+  ttl_days: i64,
 ) -> Result<(), DbError> {
-    let mut tx = pool.begin().await?;
+  let mut tx = pool.begin().await?;
 
-    // Ensure prompt exists
-    let prompt_id = ensure_prompt(&mut tx, prompt_content, prompt_hash).await?;
+  // Ensure prompt exists
+  let prompt_id = ensure_prompt(&mut tx, prompt_content, prompt_hash).await?;
 
-    // Upsert domain
-    upsert_domain(&mut tx, domain).await?;
+  // Upsert domain
+  upsert_domain(&mut tx, domain).await?;
 
-    // Insert classification
-    insert_classification(
-        &mut tx,
-        domain,
-        classification_type,
-        is_matching_site,
-        confidence as f32,
-        reasoning,
-        model,
-        prompt_id,
-        ttl_days,
-    )
-    .await?;
+  // Insert classification
+  insert_classification(
+    &mut tx,
+    domain,
+    classification_type,
+    is_matching_site,
+    confidence as f32,
+    reasoning,
+    model,
+    prompt_id,
+    ttl_days,
+  )
+  .await?;
 
-    tx.commit().await?;
+  tx.commit().await?;
 
-    Ok(())
+  Ok(())
 }
 
 /// Classification state for a specific classifier.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClassifierState {
-    /// Classification is current (within TTL, not in error state)
-    Current,
-    /// Classification exists but is expired (past valid_until)
-    Expired,
-    /// Most recent event is an error
-    Error,
-    /// No classification exists for this type
-    Missing,
+  /// Classification is current (within TTL, not in error state)
+  Current,
+  /// Classification exists but is expired (past valid_until)
+  Expired,
+  /// Most recent event is an error
+  Error,
+  /// No classification exists for this type
+  Missing,
 }
 
 /// Get the state of all classifiers for a domain in a single query.
@@ -250,20 +250,20 @@ pub enum ClassifierState {
 /// This is optimized to fetch all classifier states at once rather than
 /// querying each one individually.
 pub async fn get_classifier_states(
-    pool: &PgPool,
-    domain: &str,
-    classification_types: &[String],
+  pool: &PgPool,
+  domain: &str,
+  classification_types: &[String],
 ) -> Result<Vec<(String, ClassifierState)>, DbError> {
-    // Build a SQL query that checks both domain_classifications and
-    // domain_classification_events for each classification type.
-    //
-    // For each type, we check:
-    // 1. Is there a valid classification (valid_until > NOW)?
-    // 2. Is the most recent event an error?
-    // 3. Otherwise, it's either expired or missing.
+  // Build a SQL query that checks both domain_classifications and
+  // domain_classification_events for each classification type.
+  //
+  // For each type, we check:
+  // 1. Is there a valid classification (valid_until > NOW)?
+  // 2. Is the most recent event an error?
+  // 3. Otherwise, it's either expired or missing.
 
-    let result = sqlx::query(
-        r#"
+  let result = sqlx::query(
+    r#"
         WITH classification_types AS (
             SELECT unnest($2::text[]) AS classification_type
         ),
@@ -295,35 +295,35 @@ pub async fn get_classifier_states(
         LEFT JOIN latest_events le
             ON ct.classification_type = le.classification_type
         "#,
-    )
-    .bind(domain)
-    .bind(classification_types)
-    .fetch_all(pool)
-    .await?;
+  )
+  .bind(domain)
+  .bind(classification_types)
+  .fetch_all(pool)
+  .await?;
 
-    let mut states = Vec::new();
+  let mut states = Vec::new();
 
-    for row in result {
-        let classification_type: String = row.try_get("classification_type")?;
-        let is_valid: Option<bool> = row.try_get("is_valid").ok();
-        let latest_action: Option<String> = row.try_get("action").ok();
+  for row in result {
+    let classification_type: String = row.try_get("classification_type")?;
+    let is_valid: Option<bool> = row.try_get("is_valid").ok();
+    let latest_action: Option<String> = row.try_get("action").ok();
 
-        let state = match (is_valid, latest_action.as_deref()) {
-            // Has a valid classification.
-            (Some(true), _) => ClassifierState::Current,
+    let state = match (is_valid, latest_action.as_deref()) {
+      // Has a valid classification.
+      (Some(true), _) => ClassifierState::Current,
 
-            // Has a classification but it's expired.
-            (Some(false), _) => ClassifierState::Expired,
+      // Has a classification but it's expired.
+      (Some(false), _) => ClassifierState::Expired,
 
-            // No classification, but latest event is an error.
-            (None, Some("error")) => ClassifierState::Error,
+      // No classification, but latest event is an error.
+      (None, Some("error")) => ClassifierState::Error,
 
-            // No classification and no error = missing.
-            (None, _) => ClassifierState::Missing,
-        };
+      // No classification and no error = missing.
+      (None, _) => ClassifierState::Missing,
+    };
 
-        states.push((classification_type, state));
-    }
+    states.push((classification_type, state));
+  }
 
-    Ok(states)
+  Ok(states)
 }

@@ -5,46 +5,46 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DbError {
-    #[error("Database error: {0}")]
-    SqlxError(#[from] sqlx::Error),
+  #[error("Database error: {0}")]
+  SqlxError(#[from] sqlx::Error),
 }
 
 /// Statistics about classifications in the database.
 #[derive(Debug, Clone)]
 pub struct MetricsStats {
-    /// Count of currently valid classifications per type.
-    pub current_classifications_by_type: HashMap<String, i64>,
-    /// Count of currently valid positive classifications per type.
-    pub current_positive_by_type: HashMap<String, i64>,
-    /// Count of currently valid negative classifications per type.
-    pub current_negative_by_type: HashMap<String, i64>,
-    /// Total count of currently valid classifications (all types).
-    pub current_classifications_total: i64,
-    /// Total count of currently valid positive classifications.
-    pub current_positive_total: i64,
-    /// Total count of currently valid negative classifications.
-    pub current_negative_total: i64,
-    /// Total unique domains ever seen.
-    pub domains_seen_total: i64,
-    /// Count of classification events by action type.
-    pub events_by_action: HashMap<String, i64>,
-    /// Total classifications ever created per type (cumulative).
-    pub classifications_created_by_type: HashMap<String, i64>,
-    /// Total classifications ever created (all types).
-    pub classifications_created_total: i64,
+  /// Count of currently valid classifications per type.
+  pub current_classifications_by_type: HashMap<String, i64>,
+  /// Count of currently valid positive classifications per type.
+  pub current_positive_by_type: HashMap<String, i64>,
+  /// Count of currently valid negative classifications per type.
+  pub current_negative_by_type: HashMap<String, i64>,
+  /// Total count of currently valid classifications (all types).
+  pub current_classifications_total: i64,
+  /// Total count of currently valid positive classifications.
+  pub current_positive_total: i64,
+  /// Total count of currently valid negative classifications.
+  pub current_negative_total: i64,
+  /// Total unique domains ever seen.
+  pub domains_seen_total: i64,
+  /// Count of classification events by action type.
+  pub events_by_action: HashMap<String, i64>,
+  /// Total classifications ever created per type (cumulative).
+  pub classifications_created_by_type: HashMap<String, i64>,
+  /// Total classifications ever created (all types).
+  pub classifications_created_total: i64,
 }
 
 /// Get all blocked domains for a given classification type at a specific time
 /// Returns domains where the classification is valid at the given time and is_matching_site = true
 pub async fn get_blocked_domains(
-    pool: &PgPool,
-    classification_type: &str,
-    at_time: Option<DateTime<Utc>>,
+  pool: &PgPool,
+  classification_type: &str,
+  at_time: Option<DateTime<Utc>>,
 ) -> Result<Vec<String>, DbError> {
-    let check_time = at_time.unwrap_or_else(Utc::now);
+  let check_time = at_time.unwrap_or_else(Utc::now);
 
-    let rows = sqlx::query(
-        r#"
+  let rows = sqlx::query(
+    r#"
         SELECT DISTINCT d.domain
         FROM domains d
         INNER JOIN domain_classifications dc ON d.domain = dc.domain
@@ -54,208 +54,209 @@ pub async fn get_blocked_domains(
           AND dc.valid_until > $2
         ORDER BY d.domain ASC
         "#,
-    )
-    .bind(classification_type)
-    .bind(check_time)
-    .fetch_all(pool)
-    .await?;
+  )
+  .bind(classification_type)
+  .bind(check_time)
+  .fetch_all(pool)
+  .await?;
 
-    let domains = rows
-        .into_iter()
-        .map(|row| -> Result<String, DbError> {
-            Ok(row.try_get::<String, _>("domain")?)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+  let domains = rows
+    .into_iter()
+    .map(|row| -> Result<String, DbError> {
+      Ok(row.try_get::<String, _>("domain")?)
+    })
+    .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(domains)
+  Ok(domains)
 }
 
 /// Get comprehensive metrics statistics from the database.
 pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
-    let now = Utc::now();
+  let now = Utc::now();
 
-    // Get currently valid classifications count by type.
-    let current_by_type_rows = sqlx::query(
-        r#"
+  // Get currently valid classifications count by type.
+  let current_by_type_rows = sqlx::query(
+    r#"
         SELECT classification_type, COUNT(DISTINCT domain) as count
         FROM domain_classifications
         WHERE valid_on <= $1 AND valid_until > $1
         GROUP BY classification_type
         "#,
-    )
-    .bind(now)
-    .fetch_all(pool)
-    .await?;
+  )
+  .bind(now)
+  .fetch_all(pool)
+  .await?;
 
-    let mut current_classifications_by_type = HashMap::new();
-    for row in current_by_type_rows {
-        let classification_type: String = row.try_get("classification_type")?;
-        let count: i64 = row.try_get("count")?;
-        current_classifications_by_type.insert(classification_type, count);
-    }
+  let mut current_classifications_by_type = HashMap::new();
+  for row in current_by_type_rows {
+    let classification_type: String = row.try_get("classification_type")?;
+    let count: i64 = row.try_get("count")?;
+    current_classifications_by_type.insert(classification_type, count);
+  }
 
-    // Get currently valid positive classifications count by type.
-    let current_positive_rows = sqlx::query(
-        r#"
+  // Get currently valid positive classifications count by type.
+  let current_positive_rows = sqlx::query(
+    r#"
         SELECT classification_type, COUNT(DISTINCT domain) as count
         FROM domain_classifications
         WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
         GROUP BY classification_type
         "#,
-    )
-    .bind(now)
-    .fetch_all(pool)
-    .await?;
+  )
+  .bind(now)
+  .fetch_all(pool)
+  .await?;
 
-    let mut current_positive_by_type = HashMap::new();
-    for row in current_positive_rows {
-        let classification_type: String = row.try_get("classification_type")?;
-        let count: i64 = row.try_get("count")?;
-        current_positive_by_type.insert(classification_type, count);
-    }
+  let mut current_positive_by_type = HashMap::new();
+  for row in current_positive_rows {
+    let classification_type: String = row.try_get("classification_type")?;
+    let count: i64 = row.try_get("count")?;
+    current_positive_by_type.insert(classification_type, count);
+  }
 
-    // Get currently valid negative classifications count by type.
-    let current_negative_rows = sqlx::query(
-        r#"
+  // Get currently valid negative classifications count by type.
+  let current_negative_rows = sqlx::query(
+    r#"
         SELECT classification_type, COUNT(DISTINCT domain) as count
         FROM domain_classifications
         WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
         GROUP BY classification_type
         "#,
-    )
-    .bind(now)
-    .fetch_all(pool)
-    .await?;
+  )
+  .bind(now)
+  .fetch_all(pool)
+  .await?;
 
-    let mut current_negative_by_type = HashMap::new();
-    for row in current_negative_rows {
-        let classification_type: String = row.try_get("classification_type")?;
-        let count: i64 = row.try_get("count")?;
-        current_negative_by_type.insert(classification_type, count);
-    }
+  let mut current_negative_by_type = HashMap::new();
+  for row in current_negative_rows {
+    let classification_type: String = row.try_get("classification_type")?;
+    let count: i64 = row.try_get("count")?;
+    current_negative_by_type.insert(classification_type, count);
+  }
 
-    // Get total currently valid classifications.
-    let current_total: i64 = sqlx::query_scalar(
-        r#"
+  // Get total currently valid classifications.
+  let current_total: i64 = sqlx::query_scalar(
+    r#"
         SELECT COUNT(DISTINCT domain)
         FROM domain_classifications
         WHERE valid_on <= $1 AND valid_until > $1
         "#,
-    )
-    .bind(now)
-    .fetch_one(pool)
-    .await?;
+  )
+  .bind(now)
+  .fetch_one(pool)
+  .await?;
 
-    // Get total currently valid positive classifications.
-    let current_positive_total: i64 = sqlx::query_scalar(
-        r#"
+  // Get total currently valid positive classifications.
+  let current_positive_total: i64 = sqlx::query_scalar(
+    r#"
         SELECT COUNT(DISTINCT domain)
         FROM domain_classifications
         WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
         "#,
-    )
-    .bind(now)
-    .fetch_one(pool)
-    .await?;
+  )
+  .bind(now)
+  .fetch_one(pool)
+  .await?;
 
-    // Get total currently valid negative classifications.
-    let current_negative_total: i64 = sqlx::query_scalar(
-        r#"
+  // Get total currently valid negative classifications.
+  let current_negative_total: i64 = sqlx::query_scalar(
+    r#"
         SELECT COUNT(DISTINCT domain)
         FROM domain_classifications
         WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
         "#,
-    )
-    .bind(now)
-    .fetch_one(pool)
-    .await?;
+  )
+  .bind(now)
+  .fetch_one(pool)
+  .await?;
 
-    // Get total unique domains seen.
-    let domains_seen_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains")
-        .fetch_one(pool)
-        .await?;
+  // Get total unique domains seen.
+  let domains_seen_total: i64 =
+    sqlx::query_scalar("SELECT COUNT(*) FROM domains")
+      .fetch_one(pool)
+      .await?;
 
-    // Get event counts by action type.
-    let events_by_action_rows = sqlx::query(
-        r#"
+  // Get event counts by action type.
+  let events_by_action_rows = sqlx::query(
+    r#"
         SELECT action::text as action, COUNT(*) as count
         FROM domain_classification_events
         GROUP BY action
         "#,
-    )
-    .fetch_all(pool)
-    .await?;
+  )
+  .fetch_all(pool)
+  .await?;
 
-    let mut events_by_action = HashMap::new();
-    for row in events_by_action_rows {
-        let action: String = row.try_get("action")?;
-        let count: i64 = row.try_get("count")?;
-        events_by_action.insert(action, count);
-    }
+  let mut events_by_action = HashMap::new();
+  for row in events_by_action_rows {
+    let action: String = row.try_get("action")?;
+    let count: i64 = row.try_get("count")?;
+    events_by_action.insert(action, count);
+  }
 
-    // Get cumulative classifications created by type.
-    let created_by_type_rows = sqlx::query(
-        r#"
+  // Get cumulative classifications created by type.
+  let created_by_type_rows = sqlx::query(
+    r#"
         SELECT classification_type, COUNT(*) as count
         FROM domain_classifications
         GROUP BY classification_type
         "#,
-    )
-    .fetch_all(pool)
-    .await?;
+  )
+  .fetch_all(pool)
+  .await?;
 
-    let mut classifications_created_by_type = HashMap::new();
-    for row in created_by_type_rows {
-        let classification_type: String = row.try_get("classification_type")?;
-        let count: i64 = row.try_get("count")?;
-        classifications_created_by_type.insert(classification_type, count);
-    }
+  let mut classifications_created_by_type = HashMap::new();
+  for row in created_by_type_rows {
+    let classification_type: String = row.try_get("classification_type")?;
+    let count: i64 = row.try_get("count")?;
+    classifications_created_by_type.insert(classification_type, count);
+  }
 
-    // Get total cumulative classifications created.
-    let classifications_created_total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM domain_classifications")
-            .fetch_one(pool)
-            .await?;
+  // Get total cumulative classifications created.
+  let classifications_created_total: i64 =
+    sqlx::query_scalar("SELECT COUNT(*) FROM domain_classifications")
+      .fetch_one(pool)
+      .await?;
 
-    Ok(MetricsStats {
-        current_classifications_by_type,
-        current_positive_by_type,
-        current_negative_by_type,
-        current_classifications_total: current_total,
-        current_positive_total,
-        current_negative_total,
-        domains_seen_total,
-        events_by_action,
-        classifications_created_by_type,
-        classifications_created_total,
-    })
+  Ok(MetricsStats {
+    current_classifications_by_type,
+    current_positive_by_type,
+    current_negative_by_type,
+    current_classifications_total: current_total,
+    current_positive_total,
+    current_negative_total,
+    domains_seen_total,
+    events_by_action,
+    classifications_created_by_type,
+    classifications_created_total,
+  })
 }
 
 /// Classification details for diagnostics endpoint.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ClassificationDetail {
-    pub domain: String,
-    pub classification_type: String,
-    pub is_matching_site: bool,
-    pub confidence: f32,
-    pub reasoning: Option<String>,
-    pub model: String,
-    pub valid_on: DateTime<Utc>,
-    pub valid_until: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+  pub domain: String,
+  pub classification_type: String,
+  pub is_matching_site: bool,
+  pub confidence: f32,
+  pub reasoning: Option<String>,
+  pub model: String,
+  pub valid_on: DateTime<Utc>,
+  pub valid_until: DateTime<Utc>,
+  pub created_at: DateTime<Utc>,
 }
 
 /// Get all current valid classifications with details (for diagnostics).
 /// Can optionally filter by classification_type.
 pub async fn get_classifications(
-    pool: &PgPool,
-    classification_type: Option<&str>,
+  pool: &PgPool,
+  classification_type: Option<&str>,
 ) -> Result<Vec<ClassificationDetail>, DbError> {
-    let now = Utc::now();
+  let now = Utc::now();
 
-    let rows = if let Some(ct) = classification_type {
-        sqlx::query(
-            r#"
+  let rows = if let Some(ct) = classification_type {
+    sqlx::query(
+      r#"
             SELECT
                 dc.domain,
                 dc.classification_type,
@@ -272,14 +273,14 @@ pub async fn get_classifications(
               AND dc.valid_until > $2
             ORDER BY dc.created_at DESC
             "#,
-        )
-        .bind(ct)
-        .bind(now)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
+    )
+    .bind(ct)
+    .bind(now)
+    .fetch_all(pool)
+    .await?
+  } else {
+    sqlx::query(
+      r#"
             SELECT
                 dc.domain,
                 dc.classification_type,
@@ -295,41 +296,41 @@ pub async fn get_classifications(
               AND dc.valid_until > $1
             ORDER BY dc.created_at DESC
             "#,
-        )
-        .bind(now)
-        .fetch_all(pool)
-        .await?
-    };
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?
+  };
 
-    let classifications = rows
-        .into_iter()
-        .map(|row| -> Result<ClassificationDetail, DbError> {
-            Ok(ClassificationDetail {
-                domain: row.try_get("domain")?,
-                classification_type: row.try_get("classification_type")?,
-                is_matching_site: row.try_get("is_matching_site")?,
-                confidence: row.try_get("confidence")?,
-                reasoning: row.try_get("reasoning")?,
-                model: row.try_get("model")?,
-                valid_on: row.try_get("valid_on")?,
-                valid_until: row.try_get("valid_until")?,
-                created_at: row.try_get("created_at")?,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+  let classifications = rows
+    .into_iter()
+    .map(|row| -> Result<ClassificationDetail, DbError> {
+      Ok(ClassificationDetail {
+        domain: row.try_get("domain")?,
+        classification_type: row.try_get("classification_type")?,
+        is_matching_site: row.try_get("is_matching_site")?,
+        confidence: row.try_get("confidence")?,
+        reasoning: row.try_get("reasoning")?,
+        model: row.try_get("model")?,
+        valid_on: row.try_get("valid_on")?,
+        valid_until: row.try_get("valid_until")?,
+        created_at: row.try_get("created_at")?,
+      })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(classifications)
+  Ok(classifications)
 }
 
 /// Rebuild projections from classified events
 /// This processes all "classified" events and recreates the domain_classifications table
 pub async fn rebuild_projections_from_events(
-    pool: &PgPool,
-    ttl_days: i64,
+  pool: &PgPool,
+  ttl_days: i64,
 ) -> Result<i64, DbError> {
-    // Get all most recent "classified" events per domain/classification_type
-    // Extract the classification details from the event data
-    let rows = sqlx::query(
+  // Get all most recent "classified" events per domain/classification_type
+  // Extract the classification details from the event data
+  let rows = sqlx::query(
         r#"
         WITH latest_classified_events AS (
             SELECT DISTINCT ON (domain, (action_data->>'classification_type'))
@@ -338,7 +339,7 @@ pub async fn rebuild_projections_from_events(
                 (action_data->>'is_matching_site')::boolean as is_matching_site,
                 (action_data->>'confidence')::real as confidence,
                 action_data->>'reasoning' as reasoning,
-                action_data->>'model' as model,
+                COALESCE(action_data->>'model', 'unknown') as model,
                 prompt_id,
                 created_at
             FROM domain_classification_events
@@ -363,140 +364,142 @@ pub async fn rebuild_projections_from_events(
     .fetch_all(pool)
     .await?;
 
-    let mut tx = pool.begin().await?;
-    let mut count = 0i64;
+  let mut tx = pool.begin().await?;
+  let mut count = 0i64;
 
-    // Delete existing projections (we're rebuilding from scratch)
-    sqlx::query("DELETE FROM domain_classifications")
-        .execute(&mut *tx)
-        .await?;
+  // Delete existing projections (we're rebuilding from scratch)
+  sqlx::query("DELETE FROM domain_classifications")
+    .execute(&mut *tx)
+    .await?;
 
-    // For each classified event, create a new projection
-    for row in rows {
-        let domain: String = row.try_get("domain")?;
-        let classification_type: String = row.try_get("classification_type")?;
-        let is_matching_site: bool = row.try_get("is_matching_site")?;
-        let confidence: f32 = row.try_get("confidence")?;
-        let reasoning: Option<String> = row.try_get("reasoning")?;
-        let model: Option<String> = row.try_get("model")?;
-        let prompt_id: Option<i32> = row.try_get("prompt_id")?;
-        let event_created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
+  // For each classified event, create a new projection
+  for row in rows {
+    let domain: String = row.try_get("domain")?;
+    let classification_type: String = row.try_get("classification_type")?;
+    let is_matching_site: bool = row.try_get("is_matching_site")?;
+    let confidence: f32 = row.try_get("confidence")?;
+    let reasoning: Option<String> = row.try_get("reasoning")?;
+    let model: String = row.try_get("model")?;
+    let prompt_id: Option<i32> = row.try_get("prompt_id")?;
+    let event_created_at: chrono::DateTime<chrono::Utc> =
+      row.try_get("created_at")?;
 
-        // Calculate validity window based on event time
-        let valid_on = event_created_at;
-        let valid_until = valid_on + chrono::Duration::days(ttl_days);
+    // Calculate validity window based on event time
+    let valid_on = event_created_at;
+    let valid_until = valid_on + chrono::Duration::days(ttl_days);
 
-        // Insert projection with full event data
-        sqlx::query(
-            r#"
+    // Insert projection with full event data
+    sqlx::query(
+      r#"
             INSERT INTO domain_classifications (
                 domain, classification_type, is_matching_site, confidence,
                 reasoning, valid_on, valid_until, model, prompt_id, created_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
-        )
-        .bind(&domain)
-        .bind(&classification_type)
-        .bind(is_matching_site)
-        .bind(confidence)
-        .bind(&reasoning)
-        .bind(valid_on)
-        .bind(valid_until)
-        .bind(&model)
-        .bind(prompt_id)
-        .bind(event_created_at)
-        .execute(&mut *tx)
-        .await?;
+    )
+    .bind(&domain)
+    .bind(&classification_type)
+    .bind(is_matching_site)
+    .bind(confidence)
+    .bind(&reasoning)
+    .bind(valid_on)
+    .bind(valid_until)
+    .bind(&model)
+    .bind(prompt_id)
+    .bind(event_created_at)
+    .execute(&mut *tx)
+    .await?;
 
-        count += 1;
-    }
+    count += 1;
+  }
 
-    tx.commit().await?;
+  tx.commit().await?;
 
-    Ok(count)
+  Ok(count)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::Duration;
+  use super::*;
+  use chrono::Duration;
 
-    async fn setup_test_db() -> PgPool {
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://localhost/dns_smart_block_test".to_string());
+  async fn setup_test_db() -> PgPool {
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+      "postgresql://localhost/dns_smart_block_test".to_string()
+    });
 
-        let pool = PgPool::connect(&database_url)
-            .await
-            .expect("Failed to connect to test database");
+    let pool = PgPool::connect(&database_url)
+      .await
+      .expect("Failed to connect to test database");
 
-        // Run migrations
-        sqlx::migrate!("../migrations")
-            .run(&pool)
-            .await
-            .expect("Failed to run migrations");
+    // Run migrations
+    sqlx::migrate!("../migrations")
+      .run(&pool)
+      .await
+      .expect("Failed to run migrations");
 
-        // Clean up test data
-        sqlx::query("DELETE FROM domain_classifications")
-            .execute(&pool)
-            .await
-            .expect("Failed to clean classifications");
+    // Clean up test data
+    sqlx::query("DELETE FROM domain_classifications")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean classifications");
 
-        sqlx::query("DELETE FROM domains")
-            .execute(&pool)
-            .await
-            .expect("Failed to clean domains");
+    sqlx::query("DELETE FROM domains")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean domains");
 
-        sqlx::query("DELETE FROM prompts")
-            .execute(&pool)
-            .await
-            .expect("Failed to clean prompts");
+    sqlx::query("DELETE FROM prompts")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean prompts");
 
-        pool
-    }
+    pool
+  }
 
-    #[tokio::test]
-    #[ignore] // Requires DATABASE_URL
-    async fn test_get_blocked_domains_at_current_time() {
-        let pool = setup_test_db().await;
+  #[tokio::test]
+  #[ignore] // Requires DATABASE_URL
+  async fn test_get_blocked_domains_at_current_time() {
+    let pool = setup_test_db().await;
 
-        // Insert test prompt
-        sqlx::query(
-            r#"
+    // Insert test prompt
+    sqlx::query(
+      r#"
             INSERT INTO prompts (content, hash, created_at)
             VALUES ('test prompt', 'sha256:test', NOW())
             "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        let prompt_id: i32 = sqlx::query_scalar("SELECT id FROM prompts LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let prompt_id: i32 = sqlx::query_scalar("SELECT id FROM prompts LIMIT 1")
+      .fetch_one(&pool)
+      .await
+      .unwrap();
 
-        // Insert test domains
-        let domains = vec!["gaming1.com", "gaming2.com", "news1.com"];
-        for domain in &domains {
-            sqlx::query(
-                r#"
+    // Insert test domains
+    let domains = vec!["gaming1.com", "gaming2.com", "news1.com"];
+    for domain in &domains {
+      sqlx::query(
+        r#"
                 INSERT INTO domains (domain, last_updated)
                 VALUES ($1, NOW())
                 "#,
-            )
-            .bind(domain)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
+      )
+      .bind(domain)
+      .execute(&pool)
+      .await
+      .unwrap();
+    }
 
-        let now = Utc::now();
-        let valid_until = now + Duration::days(10);
+    let now = Utc::now();
+    let valid_until = now + Duration::days(10);
 
-        // Insert gaming classifications (valid now)
-        for domain in &["gaming1.com", "gaming2.com"] {
-            sqlx::query(
+    // Insert gaming classifications (valid now)
+    for domain in &["gaming1.com", "gaming2.com"] {
+      sqlx::query(
                 r#"
                 INSERT INTO domain_classifications (
                     domain, classification_type, confidence, valid_on, valid_until,
@@ -512,159 +515,164 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        }
+    }
 
-        // Insert news classification
-        sqlx::query(
-            r#"
+    // Insert news classification
+    sqlx::query(
+      r#"
             INSERT INTO domain_classifications (
                 domain, classification_type, confidence, valid_on, valid_until,
                 model, prompt_id, created_at
             )
             VALUES ($1, 'news', 0.95, $2, $3, 'test-model', $4, NOW())
             "#,
-        )
-        .bind("news1.com")
-        .bind(now)
-        .bind(valid_until)
-        .bind(prompt_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .bind("news1.com")
+    .bind(now)
+    .bind(valid_until)
+    .bind(prompt_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        // Query gaming domains
-        let gaming_domains = get_blocked_domains(&pool, "gaming", None).await.unwrap();
-        assert_eq!(gaming_domains.len(), 2);
-        assert!(gaming_domains.contains(&"gaming1.com".to_string()));
-        assert!(gaming_domains.contains(&"gaming2.com".to_string()));
+    // Query gaming domains
+    let gaming_domains =
+      get_blocked_domains(&pool, "gaming", None).await.unwrap();
+    assert_eq!(gaming_domains.len(), 2);
+    assert!(gaming_domains.contains(&"gaming1.com".to_string()));
+    assert!(gaming_domains.contains(&"gaming2.com".to_string()));
 
-        // Query news domains
-        let news_domains = get_blocked_domains(&pool, "news", None).await.unwrap();
-        assert_eq!(news_domains.len(), 1);
-        assert!(news_domains.contains(&"news1.com".to_string()));
-    }
+    // Query news domains
+    let news_domains = get_blocked_domains(&pool, "news", None).await.unwrap();
+    assert_eq!(news_domains.len(), 1);
+    assert!(news_domains.contains(&"news1.com".to_string()));
+  }
 
-    #[tokio::test]
-    #[ignore] // Requires DATABASE_URL
-    async fn test_get_blocked_domains_excludes_expired() {
-        let pool = setup_test_db().await;
+  #[tokio::test]
+  #[ignore] // Requires DATABASE_URL
+  async fn test_get_blocked_domains_excludes_expired() {
+    let pool = setup_test_db().await;
 
-        // Insert test prompt
-        sqlx::query(
-            r#"
+    // Insert test prompt
+    sqlx::query(
+      r#"
             INSERT INTO prompts (content, hash, created_at)
             VALUES ('test prompt', 'sha256:test', NOW())
             "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        let prompt_id: i32 = sqlx::query_scalar("SELECT id FROM prompts LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let prompt_id: i32 = sqlx::query_scalar("SELECT id FROM prompts LIMIT 1")
+      .fetch_one(&pool)
+      .await
+      .unwrap();
 
-        // Insert domain
-        sqlx::query(
-            r#"
+    // Insert domain
+    sqlx::query(
+      r#"
             INSERT INTO domains (domain, last_updated)
             VALUES ('expired.com', NOW())
             "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        let now = Utc::now();
-        let expired = now - Duration::days(1);
+    let now = Utc::now();
+    let expired = now - Duration::days(1);
 
-        // Insert expired classification
-        sqlx::query(
-            r#"
+    // Insert expired classification
+    sqlx::query(
+      r#"
             INSERT INTO domain_classifications (
                 domain, classification_type, confidence, valid_on, valid_until,
                 model, prompt_id, created_at
             )
             VALUES ($1, 'gaming', 0.9, $2, $3, 'test-model', $4, NOW())
             "#,
-        )
-        .bind("expired.com")
-        .bind(expired - Duration::days(10))
-        .bind(expired)
-        .bind(prompt_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .bind("expired.com")
+    .bind(expired - Duration::days(10))
+    .bind(expired)
+    .bind(prompt_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        // Should not return expired domain
-        let domains = get_blocked_domains(&pool, "gaming", None).await.unwrap();
-        assert_eq!(domains.len(), 0);
-    }
+    // Should not return expired domain
+    let domains = get_blocked_domains(&pool, "gaming", None).await.unwrap();
+    assert_eq!(domains.len(), 0);
+  }
 
-    #[tokio::test]
-    #[ignore] // Requires DATABASE_URL
-    async fn test_get_blocked_domains_at_specific_time() {
-        let pool = setup_test_db().await;
+  #[tokio::test]
+  #[ignore] // Requires DATABASE_URL
+  async fn test_get_blocked_domains_at_specific_time() {
+    let pool = setup_test_db().await;
 
-        // Insert test prompt
-        sqlx::query(
-            r#"
+    // Insert test prompt
+    sqlx::query(
+      r#"
             INSERT INTO prompts (content, hash, created_at)
             VALUES ('test prompt', 'sha256:test', NOW())
             "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        let prompt_id: i32 = sqlx::query_scalar("SELECT id FROM prompts LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let prompt_id: i32 = sqlx::query_scalar("SELECT id FROM prompts LIMIT 1")
+      .fetch_one(&pool)
+      .await
+      .unwrap();
 
-        // Insert domain
-        sqlx::query(
-            r#"
+    // Insert domain
+    sqlx::query(
+      r#"
             INSERT INTO domains (domain, last_updated)
             VALUES ('future.com', NOW())
             "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        let now = Utc::now();
-        let future_start = now + Duration::days(2);
-        let future_end = now + Duration::days(12);
+    let now = Utc::now();
+    let future_start = now + Duration::days(2);
+    let future_end = now + Duration::days(12);
 
-        // Insert classification that starts in the future
-        sqlx::query(
-            r#"
+    // Insert classification that starts in the future
+    sqlx::query(
+      r#"
             INSERT INTO domain_classifications (
                 domain, classification_type, confidence, valid_on, valid_until,
                 model, prompt_id, created_at
             )
             VALUES ($1, 'gaming', 0.9, $2, $3, 'test-model', $4, NOW())
             "#,
-        )
-        .bind("future.com")
-        .bind(future_start)
-        .bind(future_end)
-        .bind(prompt_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    )
+    .bind("future.com")
+    .bind(future_start)
+    .bind(future_end)
+    .bind(prompt_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        // Should not return at current time
-        let domains_now = get_blocked_domains(&pool, "gaming", None).await.unwrap();
-        assert_eq!(domains_now.len(), 0);
+    // Should not return at current time
+    let domains_now = get_blocked_domains(&pool, "gaming", None).await.unwrap();
+    assert_eq!(domains_now.len(), 0);
 
-        // Should return at future time
-        let domains_future = get_blocked_domains(&pool, "gaming", Some(future_start + Duration::hours(1)))
-            .await
-            .unwrap();
-        assert_eq!(domains_future.len(), 1);
-        assert!(domains_future.contains(&"future.com".to_string()));
-    }
+    // Should return at future time
+    let domains_future = get_blocked_domains(
+      &pool,
+      "gaming",
+      Some(future_start + Duration::hours(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(domains_future.len(), 1);
+    assert!(domains_future.contains(&"future.com".to_string()));
+  }
 }

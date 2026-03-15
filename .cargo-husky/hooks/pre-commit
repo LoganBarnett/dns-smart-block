@@ -5,6 +5,6 @@
 set -e
 
 echo "Running cargo fmt --all..."
-cargo fmt --all
+nix develop --command cargo fmt --all
 
 echo "✓ Code formatted successfully."
