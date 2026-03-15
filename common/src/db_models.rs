@@ -25,11 +25,12 @@ impl ClassificationInsert {
   ) -> Result<PgQueryResult, sqlx::Error> {
     sqlx::query(
       r#"
-            INSERT INTO domain_classifications (
-                domain, classification_type, is_matching_site, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-            "#,
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence, reasoning,
+        valid_on, valid_until, model, prompt_id, created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+      "#,
     )
     .bind(&self.domain)
     .bind(&self.classification_type)
@@ -100,13 +101,13 @@ impl Classification {
 
     let domains: Vec<(String,)> = sqlx::query_as(
       r#"
-            SELECT DISTINCT domain
-            FROM domain_classifications
-            WHERE classification_type = $1
-              AND is_matching_site = true
-              AND valid_on <= $2
-              AND valid_until > $2
-            "#,
+      SELECT DISTINCT domain
+      FROM domain_classifications
+      WHERE classification_type = $1
+        AND is_matching_site = true
+        AND valid_on <= $2
+        AND valid_until > $2
+      "#,
     )
     .bind(classification_type)
     .bind(at_time)
@@ -135,9 +136,9 @@ impl ClassificationEventInsert {
   ) -> Result<PgQueryResult, sqlx::Error> {
     sqlx::query(
       r#"
-            INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
-            VALUES ($1, $2::classification_action, $3, $4, NOW())
-            "#,
+      INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
+      VALUES ($1, $2::classification_action, $3, $4, NOW())
+      "#,
     )
     .bind(&self.domain)
     .bind(&self.action)
@@ -234,6 +235,37 @@ impl DomainUpsert {
   }
 }
 
+/// Input for expiring a domain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainExpire {
+  pub domain: String,
+}
+
+impl DomainExpire {
+  /// Expire this domain.
+  pub async fn expire(
+    &self,
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<PgQueryResult, sqlx::Error> {
+    let domain_classifications_expire = sqlx::query(
+      r#"
+      UPDATE domain_classifications
+      SET valid_until = NOW()
+      WHERE domain = $1 AND valid_on > NOW()
+      "#,
+    )
+      .bind(&self.domain)
+      .execute(&mut **tx);
+    let domain_events_expire = sqlx::query(
+      r#"
+
+      "#,
+    )
+      .bind(&self.domain)
+      .execute(&mut **tx);
+    tokio::join!(domain_classifications_expire, domain_events_expire);
+  }
+}
 /// Full domain record as read from the database.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Domain {

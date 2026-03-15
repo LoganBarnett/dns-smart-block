@@ -591,6 +591,39 @@ async fn reprojection(
   }
 }
 
+#[derive(Deserialize)]
+struct ExpirationParams {
+  domain: String,
+}
+
+async fn expire(
+  State(state): State<AppState>,
+  Query(params): Query<ExpirationParams>,
+) -> impl IntoResponse {
+  info!("Expiring domain '{}'", params.domain);
+  let mut tx = state.pool.begin().await?;
+  let expire_result = db::domain_expire(&mut tx, params.domain).await;
+  tx.commit().await?;
+  match expire_result {
+    Ok(_) => {
+      info!("Expired domain '{}'!", params.domain);
+      (
+        StatusCode::OK,
+        format!(
+          "Expired domain successful: {}", params.domain,
+        )
+      )
+    },
+    Err(e) => {
+      error!("Domain expiration failed: {}", e);
+      (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Domain expiration failed: {}\n", e),
+      )
+    }
+  }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let args = CliArgs::parse();
@@ -651,6 +684,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let admin_app = Router::new()
     .route("/classifications", get(get_classifications))
     .route("/reprojection", post(reprojection))
+    .route("/expire", post(expire))
     .layer(TraceLayer::new_for_http())
     .with_state(state);
 

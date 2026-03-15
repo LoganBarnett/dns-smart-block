@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use dns_smart_block_common::db_models::{ClassificationInsert, DomainUpsert};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgQueryResult};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -48,15 +48,15 @@ pub async fn get_blocked_domains(
 
   let rows = sqlx::query(
     r#"
-        SELECT DISTINCT d.domain
-        FROM domains d
-        INNER JOIN domain_classifications dc ON d.domain = dc.domain
-        WHERE dc.classification_type = $1
-          AND dc.is_matching_site = true
-          AND dc.valid_on <= $2
-          AND dc.valid_until > $2
-        ORDER BY d.domain ASC
-        "#,
+    SELECT DISTINCT d.domain
+    FROM domains d
+    INNER JOIN domain_classifications dc ON d.domain = dc.domain
+    WHERE dc.classification_type = $1
+      AND dc.is_matching_site = true
+      AND dc.valid_on <= $2
+      AND dc.valid_until > $2
+    ORDER BY d.domain ASC
+    "#,
   )
   .bind(classification_type)
   .bind(check_time)
@@ -80,11 +80,11 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
   // Get currently valid classifications count by type.
   let current_by_type_rows = sqlx::query(
     r#"
-        SELECT classification_type, COUNT(DISTINCT domain) as count
-        FROM domain_classifications
-        WHERE valid_on <= $1 AND valid_until > $1
-        GROUP BY classification_type
-        "#,
+    SELECT classification_type, COUNT(DISTINCT domain) as count
+    FROM domain_classifications
+    WHERE valid_on <= $1 AND valid_until > $1
+    GROUP BY classification_type
+    "#,
   )
   .bind(now)
   .fetch_all(pool)
@@ -100,11 +100,11 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
   // Get currently valid positive classifications count by type.
   let current_positive_rows = sqlx::query(
     r#"
-        SELECT classification_type, COUNT(DISTINCT domain) as count
-        FROM domain_classifications
-        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
-        GROUP BY classification_type
-        "#,
+    SELECT classification_type, COUNT(DISTINCT domain) as count
+    FROM domain_classifications
+    WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
+    GROUP BY classification_type
+    "#,
   )
   .bind(now)
   .fetch_all(pool)
@@ -120,11 +120,11 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
   // Get currently valid negative classifications count by type.
   let current_negative_rows = sqlx::query(
     r#"
-        SELECT classification_type, COUNT(DISTINCT domain) as count
-        FROM domain_classifications
-        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
-        GROUP BY classification_type
-        "#,
+    SELECT classification_type, COUNT(DISTINCT domain) as count
+    FROM domain_classifications
+    WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
+    GROUP BY classification_type
+    "#,
   )
   .bind(now)
   .fetch_all(pool)
@@ -358,35 +358,35 @@ pub async fn rebuild_projections_from_events(
   // Get all most recent "classified" events per domain/classification_type
   // Extract the classification details from the event data
   let rows = sqlx::query(
-        r#"
-        WITH latest_classified_events AS (
-            SELECT DISTINCT ON (domain, (action_data->>'classification_type'))
-                domain,
-                action_data->>'classification_type' as classification_type,
-                (action_data->>'is_matching_site')::boolean as is_matching_site,
-                (action_data->>'confidence')::real as confidence,
-                action_data->>'reasoning' as reasoning,
-                COALESCE(action_data->>'model', 'unknown') as model,
-                prompt_id,
-                created_at
-            FROM domain_classification_events
-            WHERE action = 'classified'
-            ORDER BY domain, (action_data->>'classification_type'), created_at DESC
-        )
-        SELECT
+    r#"
+    WITH latest_classified_events AS (
+        SELECT DISTINCT ON (domain, (action_data->>'classification_type'))
             domain,
-            classification_type,
-            is_matching_site,
-            confidence,
-            reasoning,
-            model,
+            action_data->>'classification_type' as classification_type,
+            (action_data->>'is_matching_site')::boolean as is_matching_site,
+            (action_data->>'confidence')::real as confidence,
+            action_data->>'reasoning' as reasoning,
+            COALESCE(action_data->>'model', 'unknown') as model,
             prompt_id,
             created_at
-        FROM latest_classified_events
-        WHERE classification_type IS NOT NULL
-          AND is_matching_site IS NOT NULL
-          AND confidence IS NOT NULL
-        "#,
+        FROM domain_classification_events
+        WHERE action = 'classified'
+        ORDER BY domain, (action_data->>'classification_type'), created_at DESC
+    )
+    SELECT
+        domain,
+        classification_type,
+        is_matching_site,
+        confidence,
+        reasoning,
+        model,
+        prompt_id,
+        created_at
+    FROM latest_classified_events
+    WHERE classification_type IS NOT NULL
+      AND is_matching_site IS NOT NULL
+      AND confidence IS NOT NULL
+    "#,
     )
     .fetch_all(pool)
     .await?;
@@ -444,6 +444,44 @@ pub async fn rebuild_projections_from_events(
   tx.commit().await?;
 
   Ok(count)
+}
+
+/// Expire all currently valid classifications for a domain.
+/// Sets valid_until = NOW() and inserts an "expired" event.
+pub async fn domain_expire(
+  tx: &mut Transaction<'_, Postgres>,
+  domain: String,
+) -> Result<PgQueryResult, DbError> {
+  let now = Utc::now();
+
+  // Expire all currently valid classifications for this domain
+  let result = sqlx::query(
+    r#"
+    UPDATE domain_classifications
+    SET valid_until = $1
+    WHERE domain = $2
+      AND valid_on <= $1
+      AND valid_until > $1
+    "#,
+  )
+  .bind(now)
+  .bind(&domain)
+  .execute(&mut **tx)
+  .await?;
+
+  // Insert an "expired" event to maintain event sourcing pattern
+  sqlx::query(
+    r#"
+    INSERT INTO domain_classification_events (domain, action, action_data, created_at)
+    VALUES ($1, 'expired'::classification_action, '{}'::jsonb, $2)
+    "#,
+  )
+  .bind(&domain)
+  .bind(now)
+  .execute(&mut **tx)
+  .await?;
+
+  Ok(result)
 }
 
 #[cfg(test)]
@@ -672,12 +710,12 @@ mod tests {
     // Insert classification that starts in the future
     sqlx::query(
       r#"
-            INSERT INTO domain_classifications (
-                domain, classification_type, confidence, valid_on, valid_until,
-                model, prompt_id, created_at
-            )
-            VALUES ($1, 'gaming', 0.9, $2, $3, 'test-model', $4, NOW())
-            "#,
+      INSERT INTO domain_classifications (
+          domain, classification_type, confidence, valid_on, valid_until,
+          model, prompt_id, created_at
+      )
+      VALUES ($1, 'gaming', 0.9, $2, $3, 'test-model', $4, NOW())
+      "#,
     )
     .bind("future.com")
     .bind(future_start)
