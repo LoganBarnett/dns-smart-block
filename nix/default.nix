@@ -25,8 +25,14 @@ let
       (lib.hasSuffix "\.lock" path) ||
       (lib.hasInfix "/src" path) ||
       (lib.hasInfix "/tests" path) ||
-      (lib.hasInfix "/migrations" path) || # For SQLx migration files
-      (lib.hasSuffix "\.txt" path) || # For prompt templates
+      # For SQLx migration files.
+      (lib.hasInfix "/migrations" path) ||
+      # For prompt templates.
+      (lib.hasSuffix "\.txt" path) ||
+      # For HTML templates (embedded via include_str!).
+      (lib.hasInfix "/templates" path) ||
+      # For static assets (embedded via include_bytes!).
+      (lib.hasInfix "/static" path) ||
       (craneLib.filterCargoSources path type);
   };
 
