@@ -1,28 +1,61 @@
+:root {
+  --bg:               #f5f5f5;
+  --surface:          #ffffff;
+  --text:             #333;
+  --text-secondary:   #666;
+  --border:           #ddd;
+  --header-bg:        #4CAF50;
+  --header-hover:     #45a049;
+  --row-hover:        #f5f5f5;
+  --error-row:        #fff3e0;
+  --error-row-hover:  #ffe0b2;
+  --shadow:           rgba(0, 0, 0, 0.1);
+  --btn-disabled:     #ccc;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:               #1a1a1a;
+    --surface:          #2d2d2d;
+    --text:             #e0e0e0;
+    --text-secondary:   #aaa;
+    --border:           #444;
+    --header-bg:        #2e7d32;
+    --header-hover:     #1b5e20;
+    --row-hover:        #3a3a3a;
+    --error-row:        #3e2723;
+    --error-row-hover:  #4e342e;
+    --shadow:           rgba(0, 0, 0, 0.4);
+    --btn-disabled:     #555;
+  }
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   margin: 20px;
-  background: #f5f5f5;
+  background: var(--bg);
+  color: var(--text);
 }
 
 h1 {
-  color: #333;
+  color: var(--text);
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  background: white;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  background: var(--surface);
+  box-shadow: 0 2px 4px var(--shadow);
 }
 
 th, td {
   padding: 12px;
   text-align: left;
-  border-bottom: 1px solid #ddd;
+  border-bottom: 1px solid var(--border);
 }
 
 th {
-  background: #4CAF50;
+  background: var(--header-bg);
   color: white;
   cursor: pointer;
   user-select: none;
@@ -32,7 +65,7 @@ th {
 }
 
 th:hover {
-  background: #45a049;
+  background: var(--header-hover);
 }
 
 th.sorted-asc::after {
@@ -44,7 +77,7 @@ th.sorted-desc::after {
 }
 
 tr:hover {
-  background: #f5f5f5;
+  background: var(--row-hover);
 }
 
 .reasoning {
@@ -54,7 +87,7 @@ tr:hover {
 }
 
 .count {
-  color: #666;
+  color: var(--text-secondary);
   font-size: 14px;
   margin-bottom: 10px;
 }
@@ -74,7 +107,7 @@ tr:hover {
 }
 
 .expire-btn:disabled {
-  background: #ccc;
+  background: var(--btn-disabled);
   cursor: not-allowed;
 }
 
@@ -93,7 +126,7 @@ tr:hover {
 }
 
 .requeue-btn:disabled {
-  background: #ccc;
+  background: var(--btn-disabled);
   cursor: not-allowed;
 }
 
@@ -113,14 +146,14 @@ tr:hover {
 }
 
 .error-row {
-  background: #fff3e0;
+  background: var(--error-row);
 }
 
 .error-row:hover {
-  background: #ffe0b2;
+  background: var(--error-row-hover);
 }
 
 h2 {
-  color: #333;
+  color: var(--text);
   margin-top: 32px;
 }
