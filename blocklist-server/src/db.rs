@@ -33,6 +33,8 @@ pub struct MetricsStats {
   pub classifications_created_by_type: HashMap<String, i64>,
   /// Total classifications ever created (all types).
   pub classifications_created_total: i64,
+  /// Count of "classified" events in the last 5 minutes per classification_type.
+  pub recent_classified_by_type: HashMap<String, i64>,
 }
 
 /// Get all blocked domains for a given classification type at a specific time
@@ -219,6 +221,29 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
       .fetch_one(pool)
       .await?;
 
+  // Get count of "classified" events in the last 5 minutes by classification_type.
+  let five_minutes_ago = Utc::now() - Duration::minutes(5);
+  let recent_classified_rows = sqlx::query(
+    r#"
+        SELECT action_data->>'classification_type' as classification_type, COUNT(*) as count
+        FROM domain_classification_events
+        WHERE action = 'classified'::classification_action
+          AND created_at >= $1
+          AND action_data->>'classification_type' IS NOT NULL
+        GROUP BY action_data->>'classification_type'
+        "#,
+  )
+  .bind(five_minutes_ago)
+  .fetch_all(pool)
+  .await?;
+
+  let mut recent_classified_by_type = HashMap::new();
+  for row in recent_classified_rows {
+    let classification_type: String = row.try_get("classification_type")?;
+    let count: i64 = row.try_get("count")?;
+    recent_classified_by_type.insert(classification_type, count);
+  }
+
   Ok(MetricsStats {
     current_classifications_by_type,
     current_positive_by_type,
@@ -230,6 +255,7 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
     events_by_action,
     classifications_created_by_type,
     classifications_created_total,
+    recent_classified_by_type,
   })
 }
 

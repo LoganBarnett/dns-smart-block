@@ -93,6 +93,12 @@ lazy_static! {
     static ref CLASSIFICATIONS_CREATED_ALL_TOTAL: IntGauge = register_int_gauge!(
         "dns_smart_block_classifications_all_total", "Total classifications ever created (all types)"
     ).unwrap();
+
+    // Recent classification event metrics (time-windowed).
+    static ref RECENT_CLASSIFICATIONS_5M: IntGaugeVec = register_int_gauge_vec!(
+        Opts::new("dns_smart_block_recent_classifications_5m", "Classified events in the last 5 minutes by type"),
+        &["classification_type"]
+    ).unwrap();
 }
 
 #[derive(Parser, Debug)]
@@ -263,6 +269,13 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
       // Update total cumulative classifications.
       CLASSIFICATIONS_CREATED_ALL_TOTAL
         .set(stats.classifications_created_total);
+
+      // Update recent classification counts (last 5 minutes).
+      for (classification_type, count) in &stats.recent_classified_by_type {
+        RECENT_CLASSIFICATIONS_5M
+          .with_label_values(&[classification_type])
+          .set(*count);
+      }
     }
     Err(e) => {
       error!("Failed to fetch database metrics: {}", e);
