@@ -537,8 +537,8 @@ in {
           Type = "oneshot";
           RemainAfterExit = true;
           ExecStart = pkgs.writeShellScript "dns-smart-block-nats-init" ''
-            # Poll until NATS accepts connections before creating the stream.
-            until ${pkgs.natscli}/bin/nats --server=${cfg.nats.url} server ping >/dev/null 2>&1; do
+            # Poll until the NATS TCP port accepts connections.
+            until (echo >/dev/tcp/localhost/4222) 2>/dev/null; do
               sleep 1
             done
             ${pkgs.natscli}/bin/nats --server=${cfg.nats.url} stream add DNS_SMART_BLOCK \
