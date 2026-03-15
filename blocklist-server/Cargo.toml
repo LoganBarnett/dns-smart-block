@@ -13,7 +13,7 @@ tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter"] }
 atty = "*"
 sqlx = { workspace = true }
-chrono = "*"
+chrono = { version = "*", features = ["serde"] }
 serde = { version = "*", features = ["derive"] }
 clap = { version = "*", features = ["derive", "env"] }
 url = "*"
