@@ -57,23 +57,24 @@ in {
   };
 
   config = mkIf blockyIntegrationCfg.enable {
-    # Auto-mapping: map all locally enabled classifiers.
-    services.blocky.settings.blocking.blackLists = mkIf blockyIntegrationCfg.autoMapAllBlocklists (
-      lib.mapAttrs
-        (classifierName: _classifier: [
-          "${blockyIntegrationCfg.blocklistUrl}/blocklist?type=${classifierName}"
-        ])
-        enabledClassifiers
-    );
-
-    # Manual mapping: use provided mappings.
-    services.blocky.settings.blocking.blackLists = mkIf (blockyIntegrationCfg.blocklistMappings != null) (
-      lib.mapAttrs
-        (groupName: classifierType: [
-          "${blockyIntegrationCfg.blocklistUrl}/blocklist?type=${classifierType}"
-        ])
-        blockyIntegrationCfg.blocklistMappings
-    );
+    # Configure blocky blacklists based on either auto-mapping or manual mapping.
+    services.blocky.settings.blocking.blackLists =
+      if blockyIntegrationCfg.autoMapAllBlocklists then
+        # Auto-mapping: map all locally enabled classifiers.
+        lib.mapAttrs
+          (classifierName: _classifier: [
+            "${blockyIntegrationCfg.blocklistUrl}/blocklist?type=${classifierName}"
+          ])
+          enabledClassifiers
+      else if blockyIntegrationCfg.blocklistMappings != null then
+        # Manual mapping: use provided mappings.
+        lib.mapAttrs
+          (groupName: classifierType: [
+            "${blockyIntegrationCfg.blocklistUrl}/blocklist?type=${classifierType}"
+          ])
+          blockyIntegrationCfg.blocklistMappings
+      else
+        {};
 
     # Assertion: prevent both auto and manual mapping.
     assertions = [
