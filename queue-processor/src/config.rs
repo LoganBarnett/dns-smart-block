@@ -1,3 +1,4 @@
+use dns_smart_block_common::db::ALL_CLASSIFICATION_TYPE;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -195,6 +196,15 @@ impl Config {
         ));
       }
 
+      // "all" is reserved as the universal override classification type.
+      if classifier.name == ALL_CLASSIFICATION_TYPE {
+        return Err(ConfigError::ValidationError(
+          "Classifier name 'all' is reserved for the universal override \
+           classification type and cannot be used as a classifier name."
+            .to_string(),
+        ));
+      }
+
       // Check that prompt template file exists.
       if !classifier.prompt_template.exists() {
         return Err(ConfigError::ValidationError(format!(
@@ -340,6 +350,32 @@ min_confidence = 1.5
       error_msg.contains("min_confidence must be between 0.0 and 1.0"),
       "Expected confidence error, got: {}",
       error_msg
+    );
+  }
+
+  #[test]
+  fn test_classifier_named_all_is_rejected() {
+    let template = NamedTempFile::new().unwrap();
+
+    let config_content = format!(
+      r#"
+[ollama]
+url = "http://localhost:11434"
+model = "llama3.2:3b"
+
+[[classifier]]
+name = "all"
+prompt_template = "{}"
+"#,
+      template.path().display()
+    );
+
+    let config: Config = toml::from_str(&config_content).unwrap();
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(
+      result.unwrap_err().to_string().contains("reserved"),
+      "Expected 'reserved' in error message"
     );
   }
 

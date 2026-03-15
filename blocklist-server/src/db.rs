@@ -718,6 +718,180 @@ mod tests {
     assert_eq!(status.recent_events[3].action, "classifying");
   }
 
+  // ── get_blocked_domains "all" override tests ──────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_get_blocked_domains_uses_all_when_no_specific_type() {
+    let (_db, pool) = setup_test_db().await;
+
+    let source_id =
+      ensure_test_source(&pool, "test prompt all", "sha256:test-all").await;
+
+    sqlx::query(
+      "INSERT INTO domains (domain, last_updated) VALUES ('example.com', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    let valid_until = now + Duration::days(10);
+
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence,
+        valid_on, valid_until, model, source_id, created_at
+      )
+      VALUES ($1, 'all', true, 1.0, $2, $3, 'provisioned', $4, NOW())
+      "#,
+    )
+    .bind("example.com")
+    .bind(now)
+    .bind(valid_until)
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let domains = get_blocked_domains(&pool, "gaming", None).await.unwrap();
+    assert!(
+      domains.contains(&"example.com".to_string()),
+      "domain with 'all' record should appear in gaming blocklist"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_get_blocked_domains_specific_type_true_wins_over_all_false() {
+    let (_db, pool) = setup_test_db().await;
+
+    let source_id = ensure_test_source(
+      &pool,
+      "test prompt wins-true",
+      "sha256:test-wins-true",
+    )
+    .await;
+
+    sqlx::query(
+      "INSERT INTO domains (domain, last_updated) VALUES ('wins-true.com', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    let valid_until = now + Duration::days(10);
+
+    // "all" says not-matching.
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence,
+        valid_on, valid_until, model, source_id, created_at
+      )
+      VALUES ($1, 'all', false, 1.0, $2, $3, 'provisioned', $4, NOW())
+      "#,
+    )
+    .bind("wins-true.com")
+    .bind(now)
+    .bind(valid_until)
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Per-type "gaming" says matching.
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence,
+        valid_on, valid_until, model, source_id, created_at
+      )
+      VALUES ($1, 'gaming', true, 0.9, $2, $3, 'test-model', $4, NOW())
+      "#,
+    )
+    .bind("wins-true.com")
+    .bind(now)
+    .bind(valid_until)
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let domains = get_blocked_domains(&pool, "gaming", None).await.unwrap();
+    assert!(
+      domains.contains(&"wins-true.com".to_string()),
+      "per-type true should win over all false"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_get_blocked_domains_specific_type_false_wins_over_all_true() {
+    let (_db, pool) = setup_test_db().await;
+
+    let source_id = ensure_test_source(
+      &pool,
+      "test prompt wins-false",
+      "sha256:test-wins-false",
+    )
+    .await;
+
+    sqlx::query(
+      "INSERT INTO domains (domain, last_updated) VALUES ('wins-false.com', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let now = Utc::now();
+    let valid_until = now + Duration::days(10);
+
+    // "all" says matching.
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence,
+        valid_on, valid_until, model, source_id, created_at
+      )
+      VALUES ($1, 'all', true, 1.0, $2, $3, 'provisioned', $4, NOW())
+      "#,
+    )
+    .bind("wins-false.com")
+    .bind(now)
+    .bind(valid_until)
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Per-type "gaming" says not-matching.
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence,
+        valid_on, valid_until, model, source_id, created_at
+      )
+      VALUES ($1, 'gaming', false, 0.9, $2, $3, 'test-model', $4, NOW())
+      "#,
+    )
+    .bind("wins-false.com")
+    .bind(now)
+    .bind(valid_until)
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let domains = get_blocked_domains(&pool, "gaming", None).await.unwrap();
+    assert!(
+      !domains.contains(&"wins-false.com".to_string()),
+      "per-type false should win over all true"
+    );
+  }
+
   // ── apply_admin_classification tests ─────────────────────────────────────
 
   #[tokio::test]

@@ -1,6 +1,6 @@
 use dns_smart_block_common::db::{
   ClassificationSource, PromptInsert, ProvisionedEntry,
-  apply_admin_classification, classification_store,
+  apply_admin_classification, classification_store, fetch_all_override,
   reconcile_provisioned_classifications,
 };
 use dns_smart_block_queue_processor::db::{
@@ -37,6 +37,81 @@ async fn setup_test_db() -> (dns_smart_block_common::test_db::TestDb, PgPool) {
     .unwrap();
 
   (test_db, pool)
+}
+
+// ── "all" override fetch ──────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn test_all_override_fetch_returns_value_when_active() {
+  let (_db, pool) = setup_test_db().await;
+
+  let domain = "always-allow.com";
+  let desired = vec![ProvisionedEntry {
+    domain: domain.to_string(),
+    classification_type: "all".to_string(),
+    is_matching_site: false,
+    confidence: 1.0,
+    reasoning: Some("Never block — internal domain.".to_string()),
+  }];
+
+  reconcile_provisioned_classifications(&pool, &desired)
+    .await
+    .expect("reconcile failed");
+
+  let result = fetch_all_override(&pool, domain)
+    .await
+    .expect("fetch_all_override failed");
+
+  assert_eq!(result, Some(false));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_all_override_fetch_returns_none_when_absent() {
+  let (_db, pool) = setup_test_db().await;
+
+  let result = fetch_all_override(&pool, "absent.com")
+    .await
+    .expect("fetch_all_override failed");
+
+  assert_eq!(result, None);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_all_override_fetch_returns_none_when_expired() {
+  let (_db, pool) = setup_test_db().await;
+
+  let domain = "expired-override.com";
+  let desired = vec![ProvisionedEntry {
+    domain: domain.to_string(),
+    classification_type: "all".to_string(),
+    is_matching_site: true,
+    confidence: 1.0,
+    reasoning: None,
+  }];
+
+  reconcile_provisioned_classifications(&pool, &desired)
+    .await
+    .expect("reconcile failed");
+
+  // Manually expire the classification.
+  sqlx::query(
+    "UPDATE domain_classifications \
+     SET valid_until = NOW() - INTERVAL '1 day' \
+     WHERE domain = $1 AND classification_type = 'all'",
+  )
+  .bind(domain)
+  .execute(&pool)
+  .await
+  .unwrap();
+
+  let result = fetch_all_override(&pool, domain)
+    .await
+    .expect("fetch_all_override failed");
+
+  assert_eq!(result, None);
 }
 
 // ── exclude rule source chain ─────────────────────────────────────────────

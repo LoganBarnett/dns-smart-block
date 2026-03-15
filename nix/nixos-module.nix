@@ -791,6 +791,16 @@ in {
     # Assertions and warnings.
     assertions = [
       {
+        # "all" is reserved as the universal override classification type in the
+        # queue processor.  Using it as a classifier name would conflict with
+        # this sentinel and is rejected at startup.
+        assertion = !(cfg.classifiers ? all);
+        message = ''
+          dns-smart-block: classifier name "all" is reserved for the universal
+          override classification type.  Choose a different name.
+        '';
+      }
+      {
         assertion = ((
           lib.length
             (lib.attrNames enabledClassifiers)) > 0

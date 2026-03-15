@@ -5,9 +5,15 @@ use std::collections::HashMap;
 
 use super::error::DbError;
 
+/// Reserved classification type that applies to all classifier types when no
+/// more-specific active record exists.  Domains with an active "all" record
+/// are never sent to the LLM.
+pub const ALL_CLASSIFICATION_TYPE: &str = "all";
+
 /// Get all blocked domains for a given classification type at a specific time.
 /// Returns domains where the classification is valid at the given time and
-/// `is_matching_site = true`.
+/// `is_matching_site = true`.  An active "all" record acts as a fallback when
+/// no per-type record exists for a domain.
 pub async fn get_blocked_domains(
   pool: &PgPool,
   classification_type: &str,
@@ -17,14 +23,19 @@ pub async fn get_blocked_domains(
 
   let rows = sqlx::query(
     r#"
-    SELECT DISTINCT d.domain
-    FROM domains d
-    INNER JOIN domain_classifications dc ON d.domain = dc.domain
-    WHERE dc.classification_type = $1
-      AND dc.is_matching_site = true
-      AND dc.valid_on <= $2
-      AND dc.valid_until > $2
-    ORDER BY d.domain ASC
+    SELECT domain FROM (
+      SELECT DISTINCT ON (domain)
+        domain,
+        is_matching_site
+      FROM domain_classifications
+      WHERE classification_type IN ($1, 'all')
+        AND valid_on <= $2
+        AND valid_until > $2
+      ORDER BY domain,
+        CASE WHEN classification_type = $1 THEN 0 ELSE 1 END ASC
+    ) ranked
+    WHERE is_matching_site = true
+    ORDER BY domain ASC
     "#,
   )
   .bind(classification_type)
@@ -36,6 +47,34 @@ pub async fn get_blocked_domains(
     .into_iter()
     .map(|row| Ok(row.try_get::<String, _>("domain")?))
     .collect()
+}
+
+/// Return the `is_matching_site` value of an active "all" override for the
+/// domain, or `None` if no such record is current.  The queue processor uses
+/// this to decide whether to skip LLM invocation entirely.
+pub async fn fetch_all_override(
+  pool: &PgPool,
+  domain: &str,
+) -> Result<Option<bool>, DbError> {
+  let now = Utc::now();
+  Ok(
+    sqlx::query_scalar(
+      r#"
+    SELECT is_matching_site
+    FROM domain_classifications
+    WHERE domain = $1
+      AND classification_type = 'all'
+      AND valid_on <= $2
+      AND valid_until > $2
+    ORDER BY created_at DESC
+    LIMIT 1
+    "#,
+    )
+    .bind(domain)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?,
+  )
 }
 
 /// Statistics about classifications in the database.
