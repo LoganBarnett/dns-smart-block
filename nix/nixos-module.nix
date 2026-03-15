@@ -365,7 +365,7 @@ in {
 
   in {
     # Install packages.
-    environment.systemPackages = builtins.attrValues packages;
+    environment.systemPackages = builtins.attrValues packages ++ [ pkgs.natscli ];
 
     # Create service user and group for PostgreSQL peer authentication.
     users.users.${serviceUser} = {
