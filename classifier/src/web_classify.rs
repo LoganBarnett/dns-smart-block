@@ -168,7 +168,7 @@ pub fn extract_metadata(
     text_from_css_selector(&document, "meta[property='og:description']");
   let og_site_name =
     text_from_css_selector(&document, "meta[property='og:site_name']");
-  let language = text_from_css_selector(&document, "html");
+  let language = attr_from_css_selector(&document, "html", "lang");
   Ok(SiteMetadata {
     domain: domain.to_string(),
     title,
