@@ -13,7 +13,7 @@ use clap::Parser;
 use dns_smart_block_blocklist_server::{
   CLASSIFICATIONS_CSS, CLASSIFICATIONS_HTML, CLASSIFICATIONS_JS,
 };
-use dns_smart_block_common::db_models::{
+use dns_smart_block_common::db::{
   DomainExpire, DomainRequeue, ErroredClassification,
 };
 use dns_smart_block_common::logging::LoggingArgs;

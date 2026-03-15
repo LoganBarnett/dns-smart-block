@@ -18,12 +18,11 @@ WITH latest_events AS (
   FROM domain_classification_events
   ORDER BY domain, created_at DESC
 )
-INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
+INSERT INTO domain_classification_events (domain, action, action_data, created_at)
 SELECT
   domain,
   'error'::classification_action,
   '{"reason": "abandoned in queued state; cleaned up 2026-02-19"}'::jsonb,
-  NULL,
   NOW()
 FROM latest_events
 WHERE action = 'queued';

@@ -12,6 +12,7 @@ sqlx = { workspace = true }
 chrono = { version = "*", features = ["serde"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
+thiserror = "*"
 tokio = { workspace = true }
 
 [dev-dependencies]

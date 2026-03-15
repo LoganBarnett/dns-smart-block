@@ -1,5 +1,5 @@
-use dns_smart_block_common::db_models::{
-  ClassifierState, PromptInsert, classification_store,
+use dns_smart_block_common::db::{
+  ClassificationSource, ClassifierState, PromptInsert, classification_store,
 };
 use dns_smart_block_queue_processor::db::insert_event;
 use serde_json::json;
@@ -23,6 +23,10 @@ async fn setup_test_db() -> (dns_smart_block_common::test_db::TestDb, PgPool) {
     .execute(&pool)
     .await
     .expect("Failed to clean domains");
+  sqlx::query("DELETE FROM classification_sources")
+    .execute(&pool)
+    .await
+    .expect("Failed to clean classification_sources");
   sqlx::query("DELETE FROM prompts")
     .execute(&pool)
     .await
@@ -160,8 +164,8 @@ async fn test_classification_store() {
   let prompt_hash = "sha256:abcd1234";
   let ttl_days = 10;
 
-  // Update projections (creates domain, prompt, and classification)
-  classification_store(
+  // Store a classification (creates domain, prompt, source, and projection).
+  let source_id = classification_store(
     &pool,
     domain,
     classification_type,
@@ -174,9 +178,9 @@ async fn test_classification_store() {
     ttl_days,
   )
   .await
-  .expect("Failed to update projections");
+  .expect("Failed to store classification");
 
-  // Verify domain was created
+  // Verify domain was created.
   let domain_result = sqlx::query(
     r#"
         SELECT domain, last_updated FROM domains WHERE domain = $1
@@ -190,22 +194,28 @@ async fn test_classification_store() {
   let found_domain: String = domain_result.try_get("domain").unwrap();
   assert_eq!(found_domain, domain);
 
-  // Verify prompt was created
-  let prompt_result = sqlx::query(
-    r#"
-        SELECT id, content, hash FROM prompts WHERE hash = $1
-        "#,
-  )
-  .bind(prompt_hash)
-  .fetch_one(&pool)
-  .await
-  .expect("Failed to fetch prompt");
+  // Verify prompt was created.
+  let stored_content: String =
+    sqlx::query_scalar(r#"SELECT content FROM prompts WHERE hash = $1"#)
+      .bind(prompt_hash)
+      .fetch_one(&pool)
+      .await
+      .expect("Failed to fetch prompt");
 
-  let prompt_id: i32 = prompt_result.try_get("id").unwrap();
-  let stored_content: String = prompt_result.try_get("content").unwrap();
   assert_eq!(stored_content, prompt_content);
 
-  // Verify classification was created
+  // Verify classification source was created and matches the returned id.
+  let cs_source_type: String = sqlx::query_scalar(
+    r#"SELECT source_type::text FROM classification_sources WHERE id = $1"#,
+  )
+  .bind(source_id)
+  .fetch_one(&pool)
+  .await
+  .expect("Failed to fetch classification source");
+
+  assert_eq!(cs_source_type, "llm_prompt");
+
+  // Verify classification projection was created with the correct source_id.
   let classification_result = sqlx::query(
     r#"
         SELECT
@@ -213,7 +223,7 @@ async fn test_classification_store() {
             classification_type,
             confidence,
             model,
-            prompt_id,
+            source_id,
             valid_until > NOW() as is_valid
         FROM domain_classifications
         WHERE domain = $1
@@ -233,15 +243,15 @@ async fn test_classification_store() {
   let class_confidence: f32 =
     classification_result.try_get("confidence").unwrap();
   let class_model: String = classification_result.try_get("model").unwrap();
-  let class_prompt_id: i32 =
-    classification_result.try_get("prompt_id").unwrap();
+  let class_source_id: i32 =
+    classification_result.try_get("source_id").unwrap();
   let is_valid: bool = classification_result.try_get("is_valid").unwrap();
 
   assert_eq!(class_domain, domain);
   assert_eq!(class_type, classification_type);
   assert!((class_confidence - confidence as f32).abs() < 0.001);
   assert_eq!(class_model, model);
-  assert_eq!(class_prompt_id, prompt_id);
+  assert_eq!(class_source_id, source_id);
   assert!(is_valid, "Classification should be valid");
 }
 
@@ -256,8 +266,8 @@ async fn test_update_projections_deduplicates_prompts() {
   let prompt_content = "Same prompt for both";
   let prompt_hash = "sha256:same1234";
 
-  // Update projections for first domain
-  classification_store(
+  // Store classification for first domain.
+  let source_id1 = classification_store(
     &pool,
     domain1,
     "gaming",
@@ -270,10 +280,10 @@ async fn test_update_projections_deduplicates_prompts() {
     10,
   )
   .await
-  .expect("Failed to update projections for domain1");
+  .expect("Failed to store classification for domain1");
 
-  // Update projections for second domain with same prompt
-  classification_store(
+  // Store classification for second domain with the same prompt.
+  let source_id2 = classification_store(
     &pool,
     domain2,
     "gaming",
@@ -286,57 +296,59 @@ async fn test_update_projections_deduplicates_prompts() {
     10,
   )
   .await
-  .expect("Failed to update projections for domain2");
+  .expect("Failed to store classification for domain2");
 
-  // Verify only one prompt exists
-  let prompt_count: i64 = sqlx::query_scalar(
-    r#"
-        SELECT COUNT(*) FROM prompts WHERE hash = $1
-        "#,
-  )
-  .bind(prompt_hash)
-  .fetch_one(&pool)
-  .await
-  .expect("Failed to count prompts");
+  // Same prompt → same source record.
+  assert_eq!(
+    source_id1, source_id2,
+    "Same prompt should produce the same source_id"
+  );
+
+  // Verify only one prompt exists.
+  let prompt_count: i64 =
+    sqlx::query_scalar(r#"SELECT COUNT(*) FROM prompts WHERE hash = $1"#)
+      .bind(prompt_hash)
+      .fetch_one(&pool)
+      .await
+      .expect("Failed to count prompts");
 
   assert_eq!(
     prompt_count, 1,
     "Should have only one prompt with the same hash"
   );
 
-  // Verify both classifications reference the same prompt
-  let prompt_id: i32 = sqlx::query_scalar(
-    r#"
-        SELECT id FROM prompts WHERE hash = $1
-        "#,
+  // Verify only one classification_source exists for this prompt.
+  let source_count: i64 = sqlx::query_scalar(
+    r#"SELECT COUNT(*) FROM classification_sources WHERE source_type = 'llm_prompt'"#,
   )
-  .bind(prompt_hash)
   .fetch_one(&pool)
   .await
-  .expect("Failed to fetch prompt id");
+  .expect("Failed to count sources");
 
-  let domain1_prompt_id: i32 = sqlx::query_scalar(
-    r#"
-        SELECT prompt_id FROM domain_classifications WHERE domain = $1
-        "#,
+  assert_eq!(
+    source_count, 1,
+    "Should have one source for the shared prompt"
+  );
+
+  // Verify both classifications reference the same source_id.
+  let domain1_source_id: i32 = sqlx::query_scalar(
+    r#"SELECT source_id FROM domain_classifications WHERE domain = $1"#,
   )
   .bind(domain1)
   .fetch_one(&pool)
   .await
-  .expect("Failed to fetch domain1 prompt_id");
+  .expect("Failed to fetch domain1 source_id");
 
-  let domain2_prompt_id: i32 = sqlx::query_scalar(
-    r#"
-        SELECT prompt_id FROM domain_classifications WHERE domain = $1
-        "#,
+  let domain2_source_id: i32 = sqlx::query_scalar(
+    r#"SELECT source_id FROM domain_classifications WHERE domain = $1"#,
   )
   .bind(domain2)
   .fetch_one(&pool)
   .await
-  .expect("Failed to fetch domain2 prompt_id");
+  .expect("Failed to fetch domain2 source_id");
 
-  assert_eq!(domain1_prompt_id, prompt_id);
-  assert_eq!(domain2_prompt_id, prompt_id);
+  assert_eq!(domain1_source_id, source_id1);
+  assert_eq!(domain2_source_id, source_id2);
 }
 
 #[tokio::test]
@@ -466,7 +478,7 @@ async fn test_get_classifier_states_current() {
     10,
   )
   .await
-  .expect("Failed to update projections");
+  .expect("Failed to store classification");
 
   let states =
     ClassifierState::domain_states(&pool, domain, &classification_types)
@@ -478,6 +490,23 @@ async fn test_get_classifier_states_current() {
   assert_eq!(states[0].1, ClassifierState::Current);
 }
 
+/// Helper: insert a prompt and its classification_source, returning source_id.
+async fn ensure_test_source(pool: &PgPool, content: &str, hash: &str) -> i32 {
+  let mut tx = pool.begin().await.expect("Failed to begin tx");
+  let prompt_id = PromptInsert {
+    content: content.to_string(),
+    hash: hash.to_string(),
+  }
+  .ensure(&mut tx)
+  .await
+  .expect("Failed to ensure prompt");
+  let source_id = ClassificationSource::ensure_for_prompt(prompt_id, &mut tx)
+    .await
+    .expect("Failed to ensure source");
+  tx.commit().await.expect("Failed to commit");
+  source_id
+}
+
 #[tokio::test]
 #[serial]
 
@@ -487,20 +516,8 @@ async fn test_get_classifier_states_expired() {
   let domain = "expired-domain.com";
   let classification_types = vec!["gaming".to_string()];
 
-  // Manually insert an expired classification.
-  // First create the prompt.
-  let prompt_id: i32 = sqlx::query_scalar(
-    r#"
-        INSERT INTO prompts (content, hash, created_at)
-        VALUES ($1, $2, NOW())
-        RETURNING id
-        "#,
-  )
-  .bind("test prompt")
-  .bind("sha256:expired")
-  .fetch_one(&pool)
-  .await
-  .expect("Failed to insert prompt");
+  let source_id =
+    ensure_test_source(&pool, "test prompt", "sha256:expired").await;
 
   // Insert domain.
   sqlx::query(
@@ -518,7 +535,7 @@ async fn test_get_classifier_states_expired() {
   sqlx::query(
         r#"
         INSERT INTO domain_classifications
-        (domain, classification_type, confidence, valid_on, valid_until, model, prompt_id, created_at)
+        (domain, classification_type, confidence, valid_on, valid_until, model, source_id, created_at)
         VALUES ($1, $2, $3, NOW() - INTERVAL '20 days', NOW() - INTERVAL '10 days', $4, $5, NOW() - INTERVAL '20 days')
         "#,
     )
@@ -526,7 +543,7 @@ async fn test_get_classifier_states_expired() {
     .bind("gaming")
     .bind(0.9_f32)
     .bind("llama2")
-    .bind(prompt_id)
+    .bind(source_id)
     .execute(&pool)
     .await
     .expect("Failed to insert expired classification");
@@ -602,7 +619,7 @@ async fn test_get_classifier_states_mixed() {
     10,
   )
   .await
-  .expect("Failed to update gaming classification");
+  .expect("Failed to store gaming classification");
 
   // video-streaming: Error (no classification, error event).
   insert_event(
@@ -619,18 +636,8 @@ async fn test_get_classifier_states_mixed() {
   .expect("Failed to insert video-streaming error");
 
   // social-media: Expired (create expired classification).
-  let prompt_id: i32 = sqlx::query_scalar(
-    r#"
-        INSERT INTO prompts (content, hash, created_at)
-        VALUES ($1, $2, NOW())
-        RETURNING id
-        "#,
-  )
-  .bind("social prompt")
-  .bind("sha256:social")
-  .fetch_one(&pool)
-  .await
-  .expect("Failed to insert prompt");
+  let source_id =
+    ensure_test_source(&pool, "social prompt", "sha256:social").await;
 
   sqlx::query(
     r#"
@@ -647,7 +654,7 @@ async fn test_get_classifier_states_mixed() {
   sqlx::query(
         r#"
         INSERT INTO domain_classifications
-        (domain, classification_type, confidence, valid_on, valid_until, model, prompt_id, created_at)
+        (domain, classification_type, confidence, valid_on, valid_until, model, source_id, created_at)
         VALUES ($1, $2, $3, NOW() - INTERVAL '20 days', NOW() - INTERVAL '5 days', $4, $5, NOW() - INTERVAL '20 days')
         "#,
     )
@@ -655,7 +662,7 @@ async fn test_get_classifier_states_mixed() {
     .bind("social-media")
     .bind(0.85_f32)
     .bind("llama2")
-    .bind(prompt_id)
+    .bind(source_id)
     .execute(&pool)
     .await
     .expect("Failed to insert expired social-media classification");
@@ -687,22 +694,23 @@ async fn test_get_classifier_states_mixed() {
   assert_eq!(news_state.1, ClassifierState::Missing);
 }
 
-// Regression: prompt insert and classified event must share a transaction so
-// the event's prompt_id FK is satisfied atomically.  Previously insert_event
-// was called with `pool` instead of the in-flight `&mut *tx`, meaning the two
-// writes could diverge if the transaction was rolled back.
+// Regression: prompt, classification source, and classified event must share a
+// transaction so the event's source_id FK is satisfied atomically.  Previously
+// insert_event was called with `pool` instead of the in-flight `&mut *tx`,
+// meaning the two writes could diverge if the transaction was rolled back.
 #[tokio::test]
 #[serial]
 
-async fn test_classified_event_and_prompt_share_transaction() {
+async fn test_classified_event_and_source_share_transaction() {
   let (_db, pool) = setup_test_db().await;
 
   let domain = "atomic-test.com";
   let prompt_content = "Is this a gaming site?";
   let prompt_hash = "sha256:atomictest";
 
-  // Simulate the queue-processor flow: open a transaction, ensure the prompt,
-  // then insert the classified event — both within the same transaction.
+  // Simulate the queue-processor flow: open a transaction, ensure the prompt
+  // and its classification source, then insert the classified event — all
+  // within the same transaction.
   let mut tx = pool.begin().await.expect("Failed to begin transaction");
 
   let prompt_id = PromptInsert {
@@ -713,6 +721,10 @@ async fn test_classified_event_and_prompt_share_transaction() {
   .await
   .expect("Failed to ensure prompt");
 
+  let source_id = ClassificationSource::ensure_for_prompt(prompt_id, &mut tx)
+    .await
+    .expect("Failed to ensure classification source");
+
   insert_event(
     &mut *tx,
     domain,
@@ -722,7 +734,7 @@ async fn test_classified_event_and_prompt_share_transaction() {
       "is_matching_site": true,
       "confidence": 0.92,
     }),
-    Some(prompt_id),
+    Some(source_id),
   )
   .await
   .expect("Failed to insert classified event");
@@ -739,9 +751,23 @@ async fn test_classified_event_and_prompt_share_transaction() {
 
   assert_eq!(stored_hash, prompt_hash, "Prompt hash should be stored");
 
-  // Event must reference the correct prompt_id.
-  let event_prompt_id: Option<i32> = sqlx::query_scalar(
-    "SELECT prompt_id FROM domain_classification_events WHERE domain = $1",
+  // Classification source must be persisted and reference the prompt.
+  let cs_prompt_id: i32 = sqlx::query_scalar(
+    "SELECT prompt_id FROM classification_sources WHERE id = $1",
+  )
+  .bind(source_id)
+  .fetch_one(&pool)
+  .await
+  .expect("Classification source not found after commit");
+
+  assert_eq!(
+    cs_prompt_id, prompt_id,
+    "Classification source should reference the prompt"
+  );
+
+  // Event must reference the correct source_id.
+  let event_source_id: Option<i32> = sqlx::query_scalar(
+    "SELECT source_id FROM domain_classification_events WHERE domain = $1",
   )
   .bind(domain)
   .fetch_one(&pool)
@@ -749,16 +775,16 @@ async fn test_classified_event_and_prompt_share_transaction() {
   .expect("Event not found after commit");
 
   assert_eq!(
-    event_prompt_id,
-    Some(prompt_id),
-    "Classified event should reference the prompt"
+    event_source_id,
+    Some(source_id),
+    "Classified event should reference the classification source"
   );
 }
 
 #[tokio::test]
 #[serial]
 
-async fn test_classified_event_rolls_back_with_prompt() {
+async fn test_classified_event_rolls_back_with_source() {
   let (_db, pool) = setup_test_db().await;
 
   let domain = "rollback-test.com";
@@ -774,17 +800,21 @@ async fn test_classified_event_rolls_back_with_prompt() {
   .await
   .expect("Failed to ensure prompt");
 
+  let source_id = ClassificationSource::ensure_for_prompt(prompt_id, &mut tx)
+    .await
+    .expect("Failed to ensure classification source");
+
   insert_event(
     &mut *tx,
     domain,
     "classified",
     json!({"classification_type": "gaming", "confidence": 0.9}),
-    Some(prompt_id),
+    Some(source_id),
   )
   .await
   .expect("Failed to insert event within transaction");
 
-  // Drop without committing — both writes must be rolled back.
+  // Drop without committing — all three writes must be rolled back.
   drop(tx);
 
   let prompt_count: i64 =
@@ -795,6 +825,19 @@ async fn test_classified_event_rolls_back_with_prompt() {
       .expect("Failed to count prompts");
 
   assert_eq!(prompt_count, 0, "Rolled-back prompt must not be persisted");
+
+  let source_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM classification_sources WHERE id = $1",
+  )
+  .bind(source_id)
+  .fetch_one(&pool)
+  .await
+  .expect("Failed to count sources");
+
+  assert_eq!(
+    source_count, 0,
+    "Rolled-back classification source must not be persisted"
+  );
 
   let event_count: i64 = sqlx::query_scalar(
     "SELECT COUNT(*) FROM domain_classification_events WHERE domain = $1",

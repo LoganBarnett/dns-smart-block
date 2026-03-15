@@ -2,7 +2,6 @@ mod config;
 mod database_url;
 mod db;
 
-use chrono::{Duration, Utc};
 use clap::Parser;
 use config::{ClassifierConfig, Config};
 use database_url::{construct_database_url, sanitize_database_url};
@@ -10,9 +9,8 @@ use db::DbError;
 use dns_smart_block_classifier::{
   compute_prompt_hash, output::ClassificationOutput,
 };
-use dns_smart_block_common::db_models::{
-  ClassificationInsert, ClassifierState, DomainUpsert, PromptInsert,
-  classification_store,
+use dns_smart_block_common::db::{
+  ClassificationSource, ClassifierState, PromptInsert, classification_store,
 };
 use dns_smart_block_common::logging::LoggingArgs;
 use futures::StreamExt;
@@ -220,62 +218,6 @@ async fn run_classifier(
   }
 }
 
-/// Writes a synthetic "not matching" classification for a domain that matches
-/// an exclude suffix, without invoking the LLM.  The projection row and the
-/// audit event are written atomically in a single transaction so the record is
-/// always consistent.
-async fn apply_exclude_rule(
-  domain: &str,
-  classification_type: &str,
-  matched_suffix: &str,
-  pool: &PgPool,
-  ttl_days: i64,
-) -> Result<()> {
-  let reasoning = format!("Excluded by suffix: {}", matched_suffix);
-  let now = Utc::now();
-
-  let mut tx = pool.begin().await?;
-
-  DomainUpsert {
-    domain: domain.to_string(),
-  }
-  .upsert(&mut tx)
-  .await?;
-
-  ClassificationInsert {
-    domain: domain.to_string(),
-    classification_type: classification_type.to_string(),
-    is_matching_site: false,
-    confidence: 1.0,
-    reasoning: Some(reasoning.clone()),
-    valid_on: now,
-    valid_until: now + Duration::days(ttl_days),
-    model: "exclude-rule".to_string(),
-    prompt_id: None,
-  }
-  .insert(&mut tx)
-  .await?;
-
-  db::insert_event(
-    &mut *tx,
-    domain,
-    "classified",
-    json!({
-      "classification_type": classification_type,
-      "is_matching_site": false,
-      "confidence": 1.0,
-      "reasoning": reasoning,
-      "exclusion_suffix": matched_suffix,
-      "model": "exclude-rule",
-    }),
-    None,
-  )
-  .await?;
-
-  tx.commit().await?;
-  Ok(())
-}
-
 async fn process_domain(
   domain: &str,
   config: &Config,
@@ -316,7 +258,7 @@ async fn process_domain(
         .find(|c| &c.name == classification_type)
         .map(|c| c.effective_ttl_days(&config.defaults))
         .unwrap_or(config.defaults.ttl_days);
-      apply_exclude_rule(
+      db::apply_exclude_rule(
         domain,
         classification_type,
         matched_suffix,
@@ -417,9 +359,9 @@ async fn process_domain(
           output.classification.confidence
         );
 
-        // Ensure the prompt row and the "classified" event are written
-        // atomically: the event has a FK on prompt_id, so both must land in
-        // the same transaction.
+        // Ensure the prompt, its classification source, and the "classified"
+        // event are written atomically: the event has a FK on source_id, so
+        // all three must land in the same transaction.
         let mut tx = pool.begin().await?;
         let prompt_id = PromptInsert {
           content: prompt_template.clone(),
@@ -427,6 +369,9 @@ async fn process_domain(
         }
         .ensure(&mut tx)
         .await?;
+
+        let source_id =
+          ClassificationSource::ensure_for_prompt(prompt_id, &mut tx).await?;
 
         db::insert_event(
           &mut *tx,
@@ -440,7 +385,7 @@ async fn process_domain(
               "http_status": output.metadata.http_status,
               "model": classifier_config.effective_ollama_model(&config.ollama),
           }),
-          Some(prompt_id),
+          Some(source_id),
         )
         .await?;
         tx.commit().await?;

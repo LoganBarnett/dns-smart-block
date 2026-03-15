@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{
   FromRow, PgPool, Postgres, Row, Transaction, postgres::PgQueryResult,
@@ -16,7 +16,7 @@ pub struct ClassificationInsert {
   pub valid_on: DateTime<Utc>,
   pub valid_until: DateTime<Utc>,
   pub model: String,
-  pub prompt_id: Option<i32>,
+  pub source_id: Option<i32>,
 }
 
 impl ClassificationInsert {
@@ -29,7 +29,7 @@ impl ClassificationInsert {
       r#"
       INSERT INTO domain_classifications (
         domain, classification_type, is_matching_site, confidence, reasoning,
-        valid_on, valid_until, model, prompt_id, created_at
+        valid_on, valid_until, model, source_id, created_at
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
       "#,
@@ -42,7 +42,7 @@ impl ClassificationInsert {
     .bind(self.valid_on)
     .bind(self.valid_until)
     .bind(&self.model)
-    .bind(self.prompt_id)
+    .bind(self.source_id)
     .execute(&mut **tx)
     .await
   }
@@ -56,7 +56,7 @@ impl ClassificationInsert {
     sqlx::query(
       r#"
             INSERT INTO domain_classifications (
-                domain, classification_type, is_matching_site, confidence, reasoning, valid_on, valid_until, model, prompt_id, created_at
+                domain, classification_type, is_matching_site, confidence, reasoning, valid_on, valid_until, model, source_id, created_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
@@ -69,7 +69,7 @@ impl ClassificationInsert {
     .bind(self.valid_on)
     .bind(self.valid_until)
     .bind(&self.model)
-    .bind(self.prompt_id)
+    .bind(self.source_id)
     .bind(created_at)
     .execute(&mut **tx)
     .await
@@ -88,7 +88,7 @@ pub struct Classification {
   pub valid_on: DateTime<Utc>,
   pub valid_until: DateTime<Utc>,
   pub model: String,
-  pub prompt_id: Option<i32>,
+  pub source_id: Option<i32>,
   pub created_at: DateTime<Utc>,
 }
 
@@ -127,7 +127,7 @@ pub struct ClassificationEventInsert {
   pub domain: String,
   pub action: String,
   pub action_data: serde_json::Value,
-  pub prompt_id: Option<i32>,
+  pub source_id: Option<i32>,
 }
 
 impl ClassificationEventInsert {
@@ -139,14 +139,14 @@ impl ClassificationEventInsert {
   ) -> Result<PgQueryResult, sqlx::Error> {
     sqlx::query(
       r#"
-      INSERT INTO domain_classification_events (domain, action, action_data, prompt_id, created_at)
+      INSERT INTO domain_classification_events (domain, action, action_data, source_id, created_at)
       VALUES ($1, $2::classification_action, $3, $4, NOW())
       "#,
     )
     .bind(&self.domain)
     .bind(&self.action)
     .bind(&self.action_data)
-    .bind(self.prompt_id)
+    .bind(self.source_id)
     .execute(executor)
     .await
   }
@@ -159,7 +159,7 @@ pub struct ClassificationEvent {
   pub domain: String,
   pub action: String,
   pub action_data: serde_json::Value,
-  pub prompt_id: Option<i32>,
+  pub source_id: Option<i32>,
   pub created_at: DateTime<Utc>,
 }
 
@@ -362,6 +362,96 @@ pub struct Prompt {
   pub created_at: DateTime<Utc>,
 }
 
+/// Provenance of a classification: who or what produced it.
+pub struct ClassificationSource;
+
+impl ClassificationSource {
+  /// Get or create a source record for the given LLM prompt.
+  /// Two classifications that used the same prompt share one source row.
+  pub async fn ensure_for_prompt(
+    prompt_id: i32,
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<i32, sqlx::Error> {
+    sqlx::query(
+      r#"
+      INSERT INTO classification_sources (source_type, prompt_id, created_at)
+      VALUES ('llm_prompt', $1, NOW())
+      ON CONFLICT (prompt_id) WHERE prompt_id IS NOT NULL DO NOTHING
+      "#,
+    )
+    .bind(prompt_id)
+    .execute(&mut **tx)
+    .await?;
+
+    let result: (i32,) = sqlx::query_as(
+      r#"
+      SELECT id FROM classification_sources
+      WHERE prompt_id = $1 AND source_type = 'llm_prompt'
+      "#,
+    )
+    .bind(prompt_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(result.0)
+  }
+
+  /// Insert a new admin source record for the given user.
+  /// Each admin classification action creates its own source row (no dedup —
+  /// each decision is a distinct provenance event).
+  pub async fn insert_admin(
+    user_id: i32,
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<i32, sqlx::Error> {
+    let result: (i32,) = sqlx::query_as(
+      r#"
+      INSERT INTO classification_sources (source_type, user_id, created_at)
+      VALUES ('admin', $1, NOW())
+      RETURNING id
+      "#,
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(result.0)
+  }
+
+  /// Get or create a source record for the given exclude-rule pattern.
+  /// `source_type` must be `"config_exclude_rule"` or `"manual_exclude_rule"`.
+  /// Two classifications that matched the same pattern share one source row.
+  pub async fn ensure_exclude_rule(
+    source_type: &str,
+    pattern: &str,
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<i32, sqlx::Error> {
+    sqlx::query(
+      r#"
+      INSERT INTO classification_sources (source_type, label, created_at)
+      VALUES ($1::classification_source_type, $2, NOW())
+      ON CONFLICT (source_type, label) WHERE label IS NOT NULL DO NOTHING
+      "#,
+    )
+    .bind(source_type)
+    .bind(pattern)
+    .execute(&mut **tx)
+    .await?;
+
+    let result: (i32,) = sqlx::query_as(
+      r#"
+      SELECT id FROM classification_sources
+      WHERE source_type = $1::classification_source_type AND label = $2
+      "#,
+    )
+    .bind(source_type)
+    .bind(pattern)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(result.0)
+  }
+}
+
 /// Input for upserting a domain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainUpsert {
@@ -546,58 +636,10 @@ impl ErroredClassification {
       .collect()
   }
 }
+
 /// Full domain record as read from the database.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Domain {
   pub domain: String,
   pub last_updated: DateTime<Utc>,
-}
-
-/// Store a classification result: upserts the prompt, upserts the domain,
-/// inserts a new projection row, all within a single transaction.
-///
-/// This is the canonical way to persist a successful classification result.
-pub async fn classification_store(
-  pool: &PgPool,
-  domain: &str,
-  classification_type: &str,
-  is_matching_site: bool,
-  confidence: f64,
-  reasoning: &str,
-  model: &str,
-  prompt_content: &str,
-  prompt_hash: &str,
-  ttl_days: i64,
-) -> Result<(), sqlx::Error> {
-  let mut tx = pool.begin().await?;
-
-  let prompt = PromptInsert {
-    content: prompt_content.to_string(),
-    hash: prompt_hash.to_string(),
-  };
-  let prompt_id = prompt.ensure(&mut tx).await?;
-
-  let domain_upsert = DomainUpsert {
-    domain: domain.to_string(),
-  };
-  domain_upsert.upsert(&mut tx).await?;
-
-  let valid_on = Utc::now();
-  let valid_until = valid_on + Duration::days(ttl_days);
-
-  let classification = ClassificationInsert {
-    domain: domain.to_string(),
-    classification_type: classification_type.to_string(),
-    is_matching_site,
-    confidence: confidence as f32,
-    reasoning: Some(reasoning.to_string()),
-    valid_on,
-    valid_until,
-    model: model.to_string(),
-    prompt_id: Some(prompt_id),
-  };
-  classification.insert(&mut tx).await?;
-
-  tx.commit().await?;
-  Ok(())
 }
