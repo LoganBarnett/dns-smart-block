@@ -110,9 +110,17 @@ struct CliArgs {
   #[arg(long, env = "DATABASE_PASSWORD_FILE")]
   database_password_file: Option<PathBuf>,
 
-  /// Address to bind the server to
-  #[arg(long, env = "BIND_ADDRESS", default_value = "0.0.0.0:3000")]
-  bind_address: String,
+  /// Address to bind the public server to (blocklist, metrics, health)
+  #[arg(long, env = "PUBLIC_BIND_ADDRESS", default_value = "0.0.0.0:3000")]
+  public_bind_address: String,
+
+  /// Address to bind the admin server to (classifications, reprojection)
+  #[arg(
+    long,
+    env = "ADMIN_BIND_ADDRESS",
+    default_value = "127.0.0.1:8080"
+  )]
+  admin_bind_address: String,
 }
 
 #[derive(Clone)]
@@ -622,27 +630,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   // Build app state
   let state = AppState { pool };
 
-  // Build router.
-  let app = Router::new()
+  // Build public router (network accessible)
+  let public_app = Router::new()
     .route("/blocklist", get(get_blocklist))
-    .route("/classifications", get(get_classifications))
-    .route("/reprojection", post(reprojection))
     .route("/health", get(health_check))
     .route("/metrics", get(metrics))
     .layer(TraceLayer::new_for_http())
+    .with_state(state.clone());
+
+  // Build admin router (localhost only)
+  let admin_app = Router::new()
+    .route("/classifications", get(get_classifications))
+    .route("/reprojection", post(reprojection))
+    .layer(TraceLayer::new_for_http())
     .with_state(state);
 
-  // Parse bind address
-  let addr: SocketAddr = args
-    .bind_address
+  // Parse bind addresses
+  let public_addr: SocketAddr = args
+    .public_bind_address
     .parse()
-    .map_err(|e| format!("Invalid bind address: {}", e))?;
+    .map_err(|e| format!("Invalid public bind address: {}", e))?;
 
-  info!("Listening on {}", addr);
+  let admin_addr: SocketAddr = args
+    .admin_bind_address
+    .parse()
+    .map_err(|e| format!("Invalid admin bind address: {}", e))?;
 
-  // Start server
-  let listener = tokio::net::TcpListener::bind(addr).await?;
-  axum::serve(listener, app).await?;
+  info!("Public server listening on {}", public_addr);
+  info!("Admin server listening on {}", admin_addr);
+
+  // Spawn admin server in background
+  let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
+  tokio::spawn(async move {
+    if let Err(e) = axum::serve(admin_listener, admin_app).await {
+      error!("Admin server error: {}", e);
+    }
+  });
+
+  // Start public server (blocks)
+  let public_listener = tokio::net::TcpListener::bind(public_addr).await?;
+  axum::serve(public_listener, public_app).await?;
 
   Ok(())
 }
