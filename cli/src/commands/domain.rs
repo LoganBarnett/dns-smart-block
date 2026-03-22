@@ -13,17 +13,31 @@ pub struct DomainArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum DomainCommands {
-  /// Apply an admin classification for a domain (manual, never reconcile-expired)
+  /// Apply an admin classification for a domain or pattern (manual, never reconcile-expired)
   Classify(ClassifyArgs),
   /// Reconcile the provisioned classification set from a JSON file
   Reconcile(ReconcileArgs),
 }
 
 #[derive(Args, Debug)]
-pub struct ClassifyArgs {
-  /// Domain to classify (e.g. "example.com")
+#[group(multiple = false)]
+pub struct ClassifyTarget {
+  /// Exact domain to classify (e.g. "example.com").
+  /// Mutually exclusive with --pattern.
   #[arg(long)]
-  pub domain: String,
+  pub domain: Option<String>,
+
+  /// Regex pattern covering a family of domains (e.g. "^(.*\\.)?example\\.com$").
+  /// Mutually exclusive with --domain.  The pattern is applied to all existing
+  /// domains in the database and stored so future matches skip the LLM.
+  #[arg(long)]
+  pub pattern: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ClassifyArgs {
+  #[command(flatten)]
+  pub target: ClassifyTarget,
 
   /// Classification type (e.g. "gaming", "news")
   #[arg(long)]
@@ -42,6 +56,7 @@ pub struct ClassifyArgs {
   pub reasoning: String,
 
   /// TTL in days.  Omit to create a classification that never expires.
+  /// Only meaningful for --domain; pattern rules never expire.
   #[arg(long)]
   pub ttl_days: Option<i64>,
 
@@ -53,7 +68,10 @@ pub struct ClassifyArgs {
 
 #[derive(Serialize)]
 struct ClassifyRequest {
-  domain: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  domain: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pattern: Option<String>,
   classification_type: String,
   is_matching_site: bool,
   confidence: f64,
@@ -65,8 +83,10 @@ struct ClassifyRequest {
 #[derive(Args, Debug)]
 pub struct ReconcileArgs {
   /// Path to a JSON file containing the desired provisioned classifications.
-  /// The file must be a JSON array of objects with fields: domain,
-  /// classification_type, is_matching_site, confidence, reasoning (optional).
+  /// The file must be a JSON array of objects.  Each object must have exactly
+  /// one of `domain` (string) or `pattern` (regex string), plus
+  /// `classification_type`, `is_matching_site`, `confidence`, and optionally
+  /// `reasoning`.
   #[arg(long)]
   pub file: PathBuf,
 }
@@ -103,10 +123,11 @@ async fn reconcile(
       body: format!("Failed to parse {:?}: {}", args.file, e),
     })?;
 
+  let domain_count = entries.iter().filter(|e| e.domain.is_some()).count();
+  let pattern_count = entries.iter().filter(|e| e.pattern.is_some()).count();
   info!(
-    "Reconciling {} provisioned classification(s) from {:?}",
-    entries.len(),
-    args.file
+    "Reconciling {} domain entry(ies) and {} pattern entry(ies) from {:?}",
+    domain_count, pattern_count, args.file
   );
 
   let url = format!("{}/reconcile", admin_url);
@@ -134,20 +155,42 @@ async fn classify(
     return Err(CliError::EnsureRequired);
   }
 
+  // Validate that exactly one of domain or pattern is provided.
+  match (&args.target.domain, &args.target.pattern) {
+    (None, None) => {
+      return Err(CliError::Api {
+        status: 0,
+        body: "Either --domain or --pattern must be provided.".to_string(),
+      });
+    }
+    (Some(_), Some(_)) => {
+      return Err(CliError::Api {
+        status: 0,
+        body: "--domain and --pattern are mutually exclusive.".to_string(),
+      });
+    }
+    _ => {}
+  }
+
   let url = format!("{}/classify", admin_url);
 
-  info!(
-    "Classifying '{}' as '{}' (matching={}, confidence={})",
-    args.domain,
-    args.classification_type,
-    args.is_matching_site,
-    args.confidence
-  );
+  if let Some(ref domain) = args.target.domain {
+    info!(
+      "Classifying '{}' as '{}' (matching={}, confidence={})",
+      domain, args.classification_type, args.is_matching_site, args.confidence
+    );
+  } else if let Some(ref pattern) = args.target.pattern {
+    info!(
+      "Applying pattern classification for '{}' as '{}' (matching={}, confidence={})",
+      pattern, args.classification_type, args.is_matching_site, args.confidence
+    );
+  }
 
   let response = client
     .post(&url)
     .json(&ClassifyRequest {
-      domain: args.domain.clone(),
+      domain: args.target.domain.clone(),
+      pattern: args.target.pattern.clone(),
       classification_type: args.classification_type.clone(),
       is_matching_site: args.is_matching_site,
       confidence: args.confidence,

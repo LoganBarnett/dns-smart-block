@@ -15,6 +15,7 @@ use dns_smart_block_blocklist_server::{
 };
 use dns_smart_block_common::db::{
   DomainExpire, DomainRequeue, ErroredClassification,
+  apply_admin_pattern_classification,
 };
 use prometheus::{Encoder, TextEncoder};
 use serde::Deserialize;
@@ -659,7 +660,15 @@ fn default_classify_user_id() -> i32 {
 
 #[derive(Deserialize)]
 struct ClassifyRequest {
-  domain: String,
+  /// Exact domain to classify.  Mutually exclusive with `pattern`.
+  #[serde(default)]
+  domain: Option<String>,
+  /// Regex pattern covering a family of domains.  Mutually exclusive with
+  /// `domain`.  When set, the classification is applied to all matching
+  /// domains already in the database, and stored as a persistent pattern rule
+  /// so future domains are also covered without LLM invocation.
+  #[serde(default)]
+  pattern: Option<String>,
   classification_type: String,
   is_matching_site: bool,
   #[serde(default = "default_classify_confidence")]
@@ -676,12 +685,14 @@ async fn reconcile(
   State(state): State<AppState>,
   axum::Json(entries): axum::Json<Vec<db::ProvisionedEntry>>,
 ) -> impl IntoResponse {
+  let domain_count = entries.iter().filter(|e| e.domain.is_some()).count();
+  let pattern_count = entries.iter().filter(|e| e.pattern.is_some()).count();
   info!(
-    "Running provisioned classification reconcile: {} desired entries",
-    entries.len()
+    "Running provisioned classification reconcile: {} domain entries, {} pattern entries",
+    domain_count, pattern_count
   );
 
-  match db::reconcile_provisioned_classifications(&state.pool, &entries).await {
+  match db::reconcile_all_provisioned(&state.pool, &entries).await {
     Ok(result) => {
       info!(
         "Reconcile complete: {} upserted, {} skipped, {} expired",
@@ -709,37 +720,82 @@ async fn classify(
   State(state): State<AppState>,
   axum::Json(req): axum::Json<ClassifyRequest>,
 ) -> impl IntoResponse {
-  info!(
-    "Applying admin classification for '{}' as '{}' (matching={}, confidence={})",
-    req.domain, req.classification_type, req.is_matching_site, req.confidence
-  );
-
-  match db::apply_admin_classification(
-    &state.pool,
-    &req.domain,
-    &req.classification_type,
-    req.is_matching_site,
-    req.confidence,
-    &req.reasoning,
-    req.user_id,
-    req.ttl_days,
-  )
-  .await
-  {
-    Ok(source_id) => {
+  match (&req.domain, &req.pattern) {
+    (Some(domain), None) => {
       info!(
-        "Admin classification applied for '{}', source_id={}",
-        req.domain, source_id
+        "Applying admin classification for '{}' as '{}' (matching={}, confidence={})",
+        domain, req.classification_type, req.is_matching_site, req.confidence
       );
-      (
-        StatusCode::OK,
-        format!("Classification applied: source_id={}\n", source_id),
+      match db::apply_admin_classification(
+        &state.pool,
+        domain,
+        &req.classification_type,
+        req.is_matching_site,
+        req.confidence,
+        &req.reasoning,
+        req.user_id,
+        req.ttl_days,
       )
+      .await
+      {
+        Ok(source_id) => {
+          info!(
+            "Admin classification applied for '{}', source_id={}",
+            domain, source_id
+          );
+          (
+            StatusCode::OK,
+            format!("Classification applied: source_id={}\n", source_id),
+          )
+        }
+        Err(e) => {
+          error!("Admin classification failed for '{}': {}", domain, e);
+          (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}\n", e))
+        }
+      }
     }
-    Err(e) => {
-      error!("Admin classification failed for '{}': {}", req.domain, e);
-      (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}\n", e))
+    (None, Some(pattern)) => {
+      info!(
+        "Applying admin pattern classification for pattern '{}' as '{}' (matching={}, confidence={})",
+        pattern, req.classification_type, req.is_matching_site, req.confidence
+      );
+      match apply_admin_pattern_classification(
+        &state.pool,
+        pattern,
+        &req.classification_type,
+        req.is_matching_site,
+        req.confidence,
+        &req.reasoning,
+        req.user_id,
+      )
+      .await
+      {
+        Ok(source_id) => {
+          info!(
+            "Admin pattern classification applied for pattern '{}', source_id={}",
+            pattern, source_id
+          );
+          (
+            StatusCode::OK,
+            format!(
+              "Pattern classification applied: source_id={}\n",
+              source_id
+            ),
+          )
+        }
+        Err(e) => {
+          error!(
+            "Admin pattern classification failed for '{}': {}",
+            pattern, e
+          );
+          (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}\n", e))
+        }
+      }
     }
+    _ => (
+      StatusCode::BAD_REQUEST,
+      "Exactly one of 'domain' or 'pattern' must be provided.\n".to_string(),
+    ),
   }
 }
 

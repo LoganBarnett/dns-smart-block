@@ -138,10 +138,13 @@ pub struct Config {
   #[serde(rename = "classifier", default)]
   pub classifiers: Vec<ClassifierConfig>,
 
-  /// Domain suffixes excluded from LLM classification.  Domains whose names
-  /// end with any listed suffix receive a synthetic "not matching"
-  /// classification at confidence 1.0, creating an audit trail without
-  /// invoking the LLM.
+  /// Domain suffixes excluded from LLM classification.
+  ///
+  /// **Deprecated**: use provisioned pattern rules instead.  The NixOS module
+  /// now converts `excludeSuffixes` entries to `provisioned_pattern` rules at
+  /// reconcile time, so the queue-processor reads them from the database rather
+  /// than from this config field.  This field is kept for backward
+  /// compatibility and will be removed in a future release.
   ///
   /// Leading-dot notation (e.g. ".example.com") matches that domain and all
   /// under it.  A bare name (e.g. "example.com") matches any domain whose

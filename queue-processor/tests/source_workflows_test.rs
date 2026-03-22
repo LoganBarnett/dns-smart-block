@@ -48,7 +48,8 @@ async fn test_all_override_fetch_returns_value_when_active() {
 
   let domain = "always-allow.com";
   let desired = vec![ProvisionedEntry {
-    domain: domain.to_string(),
+    domain: Some(domain.to_string()),
+    pattern: None,
     classification_type: "all".to_string(),
     is_matching_site: false,
     confidence: 1.0,
@@ -85,7 +86,8 @@ async fn test_all_override_fetch_returns_none_when_expired() {
 
   let domain = "expired-override.com";
   let desired = vec![ProvisionedEntry {
-    domain: domain.to_string(),
+    domain: Some(domain.to_string()),
+    pattern: None,
     classification_type: "all".to_string(),
     is_matching_site: true,
     confidence: 1.0,
@@ -380,7 +382,8 @@ async fn test_llm_classification_source_chain() {
 
 fn gaming_entry(domain: &str) -> ProvisionedEntry {
   ProvisionedEntry {
-    domain: domain.to_string(),
+    domain: Some(domain.to_string()),
+    pattern: None,
     classification_type: "gaming".to_string(),
     is_matching_site: true,
     confidence: 0.95,
@@ -512,7 +515,8 @@ async fn test_reconcile_updates_changed_entries() {
     .unwrap();
 
   let updated = vec![ProvisionedEntry {
-    domain: "changed.com".to_string(),
+    domain: Some("changed.com".to_string()),
+    pattern: None,
     classification_type: "gaming".to_string(),
     is_matching_site: true,
     confidence: 0.55, // changed

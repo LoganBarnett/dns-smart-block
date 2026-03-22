@@ -7,4 +7,7 @@ pub enum DbError {
 
   #[error("JSON error: {0}")]
   JsonError(#[from] serde_json::Error),
+
+  #[error("Invalid regex pattern: {0}")]
+  RegexError(String),
 }

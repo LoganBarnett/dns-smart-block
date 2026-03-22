@@ -261,8 +261,29 @@ in {
       type = types.listOf (types.submodule {
         options = {
           domain = mkOption {
-            type = types.str;
-            description = "Domain to classify (e.g. \"example.com\")";
+            type = types.nullOr types.str;
+            default = null;
+            description = ''
+              Exact registrable domain to classify (e.g. "example.com").
+              Mutually exclusive with <option>pattern</option>.  Exactly one
+              of the two must be non-null per entry.
+            '';
+          };
+
+          pattern = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = ''
+              POSIX regular expression matching domains that should receive
+              this classification.  Mutually exclusive with
+              <option>domain</option>.  When the pattern is reconciled, all
+              existing domains in the database that match are immediately
+              reclassified and any active LLM classifications for those
+              domains are expired.
+
+              Example: <literal>^(.*\.)?dndbeyond\.com$</literal> matches
+              <literal>dndbeyond.com</literal> and all subdomains.
+            '';
           };
 
           classificationType = mkOption {
@@ -329,15 +350,20 @@ in {
       default = [];
       example = [ ".example.com" ".local" ];
       description = ''
-        Domain suffixes excluded from LLM classification.  Domains whose names
-        end with any listed suffix receive a synthetic "not matching"
-        classification at confidence 1.0, creating an audit trail without
-        invoking the LLM.
+        Domain suffixes excluded from LLM classification.  Each entry is
+        converted to a provisioned pattern rule at reconcile time, so the
+        queue-processor reads exclusions from the database rather than from
+        the config file.
 
-        Use leading-dot notation (e.g. <literal>.example.com</literal>) to match a
-        TLD and all names under it.  A bare name (e.g.
+        Use leading-dot notation (e.g. <literal>.example.com</literal>) to
+        match a TLD and all names under it.  A bare name (e.g.
         <literal>example.com</literal>) matches any domain whose string
         representation ends with it, including subdomains.
+
+        This option is syntactic sugar for adding entries to
+        <option>provisionedClassifications</option> with a derived regex
+        pattern, <literal>classificationType = "all"</literal>, and
+        <literal>isMatchingSite = false</literal>.
       '';
     };
 
@@ -692,20 +718,46 @@ in {
       };
       # Reconcile provisioned classifications after the blocklist server is up.
       dns-smart-block-provisioned-classifications =
-        mkIf (cfg.blocklistServer.enable && cfg.provisionedClassifications != []) (let
+        mkIf (cfg.blocklistServer.enable
+          && (cfg.provisionedClassifications != [] || cfg.excludeSuffixes != [])) (let
           adminUrl = "http://${cfg.blocklistServer.adminBindHost}:${toString cfg.blocklistServer.adminBindPort}";
           publicHealthUrl = "http://127.0.0.1:${toString cfg.blocklistServer.publicBindPort}/health";
+
+          # Convert an excludeSuffixes entry to a provisioned pattern entry.
+          # ".example.com" or "example.com" → "^(.*\.)?example\.com$"
+          suffixToPatternEntry = suffix: let
+            # Strip a leading dot if present.
+            bare = if lib.hasPrefix "." suffix
+              then lib.removePrefix "." suffix
+              else suffix;
+            # Escape literal dots in the bare suffix for use in a regex.
+            escaped = lib.replaceStrings ["."] ["\\."] bare;
+          in {
+            pattern = "^(.*\\.)?${escaped}$";
+            classification_type = "all";
+            is_matching_site = false;
+            confidence = 1.0;
+            reasoning = "Excluded by suffix rule: ${suffix}";
+          };
 
           # Generate the JSON file in the Nix store; the CLI reads it and
           # POSTs the full desired set to POST /reconcile.
           provisionsFile = pkgs.writeText "dns-smart-block-provisioned.json" (
-            builtins.toJSON (map (mc:
-              { domain = mc.domain;
-                classification_type = mc.classificationType;
-                is_matching_site = mc.isMatchingSite;
-                confidence = mc.confidence;
-              } // lib.optionalAttrs (mc.reasoning != "") { reasoning = mc.reasoning; }
-            ) cfg.provisionedClassifications)
+            builtins.toJSON (
+              # Domain-based and pattern-based provisioned entries.
+              (map (mc:
+                { classification_type = mc.classificationType;
+                  is_matching_site = mc.isMatchingSite;
+                  confidence = mc.confidence;
+                }
+                // lib.optionalAttrs (mc.domain != null) { domain = mc.domain; }
+                // lib.optionalAttrs (mc.pattern != null) { pattern = mc.pattern; }
+                // lib.optionalAttrs (mc.reasoning != "") { reasoning = mc.reasoning; }
+              ) cfg.provisionedClassifications)
+              ++
+              # excludeSuffixes converted to pattern entries.
+              (map suffixToPatternEntry cfg.excludeSuffixes)
+            )
           );
         in {
           description = "Reconcile provisioned DNS Smart Block classifications";
@@ -798,6 +850,16 @@ in {
         message = ''
           dns-smart-block: classifier name "all" is reserved for the universal
           override classification type.  Choose a different name.
+        '';
+      }
+      {
+        assertion = lib.all (mc:
+          (mc.domain != null) != (mc.pattern != null)
+        ) cfg.provisionedClassifications;
+        message = ''
+          Each services.dns-smart-block.provisionedClassifications entry must
+          have exactly one of <domain> or <pattern> set (not both, not
+          neither).
         '';
       }
       {

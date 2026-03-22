@@ -11,7 +11,8 @@ use dns_smart_block_classifier::{
   compute_prompt_hash, output::ClassificationOutput,
 };
 use dns_smart_block_common::db::{
-  ClassificationSource, ClassifierState, PromptInsert, classification_store,
+  ActiveProvisionedPattern, ClassificationSource, ClassifierState,
+  PromptInsert, apply_pattern_classification, classification_store,
   fetch_all_override,
 };
 use dns_smart_block_common::logging::LoggingArgs;
@@ -233,6 +234,7 @@ async fn process_domain(
   config: &Config,
   pool: &PgPool,
   classifier_path: &str,
+  compiled_patterns: &[(regex::Regex, ActiveProvisionedPattern)],
 ) -> Result<()> {
   info!("Processing domain: {}", domain);
 
@@ -243,8 +245,39 @@ async fn process_domain(
   let states =
     ClassifierState::domain_states(pool, domain, &classification_types).await?;
 
-  // If the domain matches an exclude suffix, write a synthetic classification
-  // for each classifier that needs updating and return without running the LLM.
+  // Check active provisioned pattern rules (DB-backed, supersedes the old
+  // in-memory exclude_suffixes mechanism).  If any pattern matches the domain,
+  // apply pattern-sourced classifications for each classifier that still needs
+  // one and return without invoking the LLM.
+  if let Some((_, matched_rule)) =
+    compiled_patterns.iter().find(|(re, _)| re.is_match(domain))
+  {
+    info!(
+      "Domain {} matches provisioned pattern '{}', applying pattern classification",
+      domain, matched_rule.pattern
+    );
+    for (classification_type, state) in &states {
+      if *state == ClassifierState::Current {
+        info!(
+          "Skipping pattern record for {} ({}): classification is current",
+          domain, classification_type
+        );
+        continue;
+      }
+      apply_pattern_classification(
+        pool,
+        domain,
+        classification_type,
+        matched_rule,
+      )
+      .await?;
+    }
+    return Ok(());
+  }
+
+  // Fall back to the old in-memory exclude_suffixes for backward compatibility
+  // while operators migrate to provisioned pattern rules.
+  #[allow(deprecated)]
   if let Some(matched_suffix) = config
     .exclude_suffixes
     .iter()
@@ -588,6 +621,30 @@ async fn main() -> Result<()> {
     ProcessorError::NatsError(format!("Failed to get message stream: {}", e))
   })?;
 
+  // Load active provisioned pattern rules from the database and compile them.
+  // These replace the in-memory exclude_suffixes for domains that match a regex.
+  info!("Loading active provisioned pattern rules...");
+  let active_patterns =
+    ActiveProvisionedPattern::fetch_all_active(&pool).await?;
+  let compiled_patterns: Vec<(regex::Regex, ActiveProvisionedPattern)> =
+    active_patterns
+      .into_iter()
+      .filter_map(|rule| match regex::Regex::new(&rule.pattern) {
+        Ok(re) => Some((re, rule)),
+        Err(e) => {
+          warn!(
+            "Skipping pattern '{}': failed to compile regex: {}",
+            rule.pattern, e
+          );
+          None
+        }
+      })
+      .collect();
+  info!(
+    "Loaded {} compiled pattern rule(s)",
+    compiled_patterns.len()
+  );
+
   dns_smart_block_common::systemd::notify_ready();
   dns_smart_block_common::systemd::spawn_watchdog();
 
@@ -620,6 +677,7 @@ async fn main() -> Result<()> {
           &config,
           &pool,
           &args.classifier_path,
+          &compiled_patterns,
         )
         .await
         {

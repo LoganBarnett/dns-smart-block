@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::error::DbError;
 use super::models::{
-  ClassificationEventInsert, ClassificationInsert, ClassificationSource,
-  DomainUpsert, PromptInsert,
+  ActiveProvisionedPattern, ClassificationEventInsert, ClassificationInsert,
+  ClassificationSource, DomainUpsert, PromptInsert,
 };
 
 /// Insert a domain_classification_event.  Accepts any Postgres executor so
@@ -277,9 +277,17 @@ pub async fn apply_admin_classification(
 
 /// A single desired provisioned classification entry, as declared in NixOS
 /// configuration and submitted via `dns-smart-block-cli domain reconcile`.
+///
+/// Exactly one of `domain` or `pattern` must be set.  Use `domain` for an
+/// exact-match classification of a single registrable domain; use `pattern`
+/// for a POSIX/Rust-regex that should cover a family of domains (e.g.
+/// `^(.*\.)?dndbeyond\.com$`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvisionedEntry {
-  pub domain: String,
+  #[serde(default)]
+  pub domain: Option<String>,
+  #[serde(default)]
+  pub pattern: Option<String>,
   pub classification_type: String,
   pub is_matching_site: bool,
   pub confidence: f64,
@@ -341,14 +349,22 @@ pub async fn reconcile_provisioned_classifications(
 
   let desired_keys: HashSet<(String, String)> = desired
     .iter()
-    .map(|e| (e.domain.clone(), e.classification_type.clone()))
+    .filter_map(|e| {
+      e.domain
+        .as_ref()
+        .map(|d| (d.clone(), e.classification_type.clone()))
+    })
     .collect();
 
   let mut upserted = 0usize;
   let mut skipped = 0usize;
 
   for entry in desired {
-    let key = (entry.domain.clone(), entry.classification_type.clone());
+    let domain = match &entry.domain {
+      Some(d) => d.clone(),
+      None => continue, // pattern entries are handled by reconcile_provisioned_patterns
+    };
+    let key = (domain.clone(), entry.classification_type.clone());
 
     // Skip if the active row already matches desired values.
     if let Some(&(existing_matching, existing_conf, ref existing_reasoning)) =
@@ -373,21 +389,40 @@ pub async fn reconcile_provisioned_classifications(
         "#,
       )
       .bind(now)
-      .bind(&entry.domain)
+      .bind(&domain)
       .bind(&entry.classification_type)
       .bind(source_id)
       .execute(&mut *tx)
       .await?;
     }
 
+    // Expire any active LLM-sourced classifications for this (domain, type)
+    // so the provisioned row wins over stale LLM results.
+    sqlx::query(
+      r#"
+      UPDATE domain_classifications SET valid_until = $1
+      WHERE domain = $2 AND classification_type = $3
+        AND valid_until > $1
+        AND source_id IN (
+          SELECT id FROM classification_sources
+          WHERE source_type IN ('llm_prompt', 'config_exclude_rule', 'manual_exclude_rule')
+        )
+      "#,
+    )
+    .bind(now)
+    .bind(&domain)
+    .bind(&entry.classification_type)
+    .execute(&mut *tx)
+    .await?;
+
     DomainUpsert {
-      domain: entry.domain.clone(),
+      domain: domain.clone(),
     }
     .upsert(&mut tx)
     .await?;
 
     ClassificationInsert {
-      domain: entry.domain.clone(),
+      domain: domain.clone(),
       classification_type: entry.classification_type.clone(),
       is_matching_site: entry.is_matching_site,
       confidence: entry.confidence as f32,
@@ -402,7 +437,7 @@ pub async fn reconcile_provisioned_classifications(
 
     insert_event(
       &mut *tx,
-      &entry.domain,
+      &domain,
       "classified",
       json!({
         "classification_type": entry.classification_type,
@@ -458,6 +493,370 @@ pub async fn reconcile_provisioned_classifications(
     skipped,
     expired,
   })
+}
+
+/// Apply a provisioned-pattern classification for a single domain.
+///
+/// This is used both during `reconcile_provisioned_patterns` (retroactive
+/// application to existing domains) and by the queue-processor (to skip the
+/// LLM when a domain matches an active pattern rule at processing time).
+///
+/// - Upserts the domain.
+/// - Expires any active LLM-sourced or exclude-rule classifications for
+///   `(domain, classification_type)` so the pattern row wins.
+/// - Inserts a fresh `domain_classifications` row that never expires.
+/// - Inserts a `classified` event.
+pub async fn apply_pattern_classification(
+  pool: &PgPool,
+  domain: &str,
+  classification_type: &str,
+  pattern_rule: &ActiveProvisionedPattern,
+) -> Result<(), DbError> {
+  let now = Utc::now();
+  let mut tx = pool.begin().await?;
+
+  DomainUpsert {
+    domain: domain.to_string(),
+  }
+  .upsert(&mut tx)
+  .await?;
+
+  // Expire active LLM / exclude-rule classifications so the pattern wins.
+  sqlx::query(
+    r#"
+    UPDATE domain_classifications SET valid_until = $1
+    WHERE domain = $2 AND classification_type = $3
+      AND valid_until > $1
+      AND source_id IN (
+        SELECT id FROM classification_sources
+        WHERE source_type IN (
+          'llm_prompt', 'config_exclude_rule', 'manual_exclude_rule'
+        )
+      )
+    "#,
+  )
+  .bind(now)
+  .bind(domain)
+  .bind(classification_type)
+  .execute(&mut *tx)
+  .await?;
+
+  ClassificationInsert {
+    domain: domain.to_string(),
+    classification_type: classification_type.to_string(),
+    is_matching_site: pattern_rule.is_matching_site,
+    confidence: pattern_rule.confidence,
+    reasoning: pattern_rule.reasoning.clone(),
+    valid_on: now,
+    valid_until: never_expires_at(now),
+    model: "provisioned-pattern".to_string(),
+    source_id: pattern_rule.source_id,
+  }
+  .insert(&mut tx)
+  .await?;
+
+  insert_event(
+    &mut *tx,
+    domain,
+    "classified",
+    json!({
+      "classification_type": classification_type,
+      "is_matching_site": pattern_rule.is_matching_site,
+      "confidence": pattern_rule.confidence,
+      "reasoning": pattern_rule.reasoning.as_deref().unwrap_or(""),
+      "model": "provisioned-pattern",
+      "matched_pattern": pattern_rule.pattern,
+    }),
+    pattern_rule.source_id,
+  )
+  .await?;
+
+  tx.commit().await?;
+  Ok(())
+}
+
+/// Reconcile the `provisioned_pattern_rules` table against a desired set of
+/// pattern entries.
+///
+/// - Desired patterns that are new or changed are upserted (old rule expired,
+///   new rule inserted).
+/// - For each new/changed pattern, all existing domains in the database that
+///   match the regex are immediately reclassified.
+/// - Rules that are no longer in the desired set are expired.
+/// - Admin-sourced pattern rules are never touched.
+pub async fn reconcile_provisioned_patterns(
+  pool: &PgPool,
+  desired: &[ProvisionedEntry],
+) -> Result<ReconcileResult, DbError> {
+  let now = Utc::now();
+
+  // Fetch currently-active provisioned_pattern rules.
+  let active_rules: Vec<(
+    i32,
+    String,
+    String,
+    bool,
+    f32,
+    Option<String>,
+    Option<i32>,
+  )> = sqlx::query_as(
+    r#"
+      SELECT ppr.id, ppr.pattern, ppr.classification_type, ppr.is_matching_site,
+             ppr.confidence, ppr.reasoning, ppr.source_id
+      FROM provisioned_pattern_rules ppr
+      JOIN classification_sources cs ON ppr.source_id = cs.id
+      WHERE cs.source_type = 'provisioned_pattern'
+        AND ppr.valid_on <= $1 AND ppr.valid_until > $1
+      "#,
+  )
+  .bind(now)
+  .fetch_all(pool)
+  .await?;
+
+  let mut active_map: std::collections::HashMap<
+    (String, String),
+    (i32, bool, f32, Option<String>, Option<i32>),
+  > = std::collections::HashMap::new();
+  for (id, pattern, ct, is_matching, confidence, reasoning, source_id) in
+    &active_rules
+  {
+    active_map.insert(
+      (pattern.clone(), ct.clone()),
+      (
+        *id,
+        *is_matching,
+        *confidence,
+        reasoning.clone(),
+        *source_id,
+      ),
+    );
+  }
+
+  let desired_keys: std::collections::HashSet<(String, String)> = desired
+    .iter()
+    .filter_map(|e| {
+      e.pattern
+        .as_ref()
+        .map(|p| (p.clone(), e.classification_type.clone()))
+    })
+    .collect();
+
+  let mut upserted = 0usize;
+  let mut skipped = 0usize;
+  let mut expired = 0usize;
+
+  for entry in desired {
+    let pattern = match &entry.pattern {
+      Some(p) => p,
+      None => continue, // domain entries handled by reconcile_provisioned_classifications
+    };
+
+    let key = (pattern.clone(), entry.classification_type.clone());
+
+    if let Some((
+      _,
+      existing_matching,
+      existing_conf,
+      ref existing_reasoning,
+      _,
+    )) = active_map.get(&key)
+    {
+      let same = *existing_matching == entry.is_matching_site
+        && (*existing_conf - entry.confidence as f32).abs() < 0.0001
+        && existing_reasoning.as_deref().unwrap_or("")
+          == entry.reasoning.as_deref().unwrap_or("");
+
+      if same {
+        skipped += 1;
+        continue;
+      }
+
+      // Values changed — expire the old rule row.
+      let old_id = active_map[&key].0;
+      sqlx::query(
+        "UPDATE provisioned_pattern_rules SET valid_until = $1 WHERE id = $2",
+      )
+      .bind(now)
+      .bind(old_id)
+      .execute(pool)
+      .await?;
+    }
+
+    // Ensure the classification_sources row for this pattern exists.
+    let mut tx = pool.begin().await?;
+    let source_id = ClassificationSource::ensure_provisioned_pattern(
+      pattern,
+      &entry.classification_type,
+      &mut tx,
+    )
+    .await?;
+
+    // Insert the new pattern rule.
+    sqlx::query(
+      r#"
+      INSERT INTO provisioned_pattern_rules
+        (pattern, classification_type, is_matching_site, confidence, reasoning,
+         source_id, valid_on, valid_until, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      "#,
+    )
+    .bind(pattern)
+    .bind(&entry.classification_type)
+    .bind(entry.is_matching_site)
+    .bind(entry.confidence as f32)
+    .bind(entry.reasoning.as_deref())
+    .bind(source_id)
+    .bind(now)
+    .bind(never_expires_at(now))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    // Build the ActiveProvisionedPattern to pass to apply_pattern_classification.
+    let rule = ActiveProvisionedPattern {
+      id: 0, // not needed for apply
+      pattern: pattern.clone(),
+      classification_type: entry.classification_type.clone(),
+      is_matching_site: entry.is_matching_site,
+      confidence: entry.confidence as f32,
+      reasoning: entry.reasoning.clone(),
+      source_id: Some(source_id),
+    };
+
+    // Retroactively apply to all existing matching domains.
+    let re = regex::Regex::new(pattern)
+      .map_err(|e| DbError::RegexError(e.to_string()))?;
+
+    let all_domains: Vec<String> =
+      sqlx::query_scalar("SELECT domain FROM domains")
+        .fetch_all(pool)
+        .await?;
+
+    for domain in all_domains {
+      if re.is_match(&domain) {
+        apply_pattern_classification(
+          pool,
+          &domain,
+          &entry.classification_type,
+          &rule,
+        )
+        .await?;
+      }
+    }
+
+    upserted += 1;
+  }
+
+  // Expire any active provisioned pattern rules no longer in the desired set.
+  for ((pattern, ct), (rule_id, _, _, _, _)) in &active_map {
+    if !desired_keys.contains(&(pattern.clone(), ct.clone())) {
+      sqlx::query(
+        "UPDATE provisioned_pattern_rules SET valid_until = $1 WHERE id = $2",
+      )
+      .bind(now)
+      .bind(rule_id)
+      .execute(pool)
+      .await?;
+      expired += 1;
+    }
+  }
+
+  Ok(ReconcileResult {
+    upserted,
+    skipped,
+    expired,
+  })
+}
+
+/// Top-level reconcile: routes domain-based entries to
+/// `reconcile_provisioned_classifications` and pattern-based entries to
+/// `reconcile_provisioned_patterns`, then sums the results.
+pub async fn reconcile_all_provisioned(
+  pool: &PgPool,
+  entries: &[ProvisionedEntry],
+) -> Result<ReconcileResult, DbError> {
+  let domain_result =
+    reconcile_provisioned_classifications(pool, entries).await?;
+  let pattern_result = reconcile_provisioned_patterns(pool, entries).await?;
+
+  Ok(ReconcileResult {
+    upserted: domain_result.upserted + pattern_result.upserted,
+    skipped: domain_result.skipped + pattern_result.skipped,
+    expired: domain_result.expired + pattern_result.expired,
+  })
+}
+
+/// Write a pattern-based admin classification.  Similar to
+/// `reconcile_provisioned_patterns` but uses an `admin` source rather than
+/// `provisioned_pattern`, so reconcile never touches it.
+///
+/// Inserts a new `provisioned_pattern_rules` row (sourced from the given
+/// admin user) and immediately applies the classification to all existing
+/// domains in the database that match the regex.
+///
+/// Returns the source_id of the newly created admin source.
+pub async fn apply_admin_pattern_classification(
+  pool: &PgPool,
+  pattern: &str,
+  classification_type: &str,
+  is_matching_site: bool,
+  confidence: f64,
+  reasoning: &str,
+  user_id: i32,
+) -> Result<i32, DbError> {
+  let now = Utc::now();
+
+  let mut tx = pool.begin().await?;
+  let source_id = ClassificationSource::admin_insert(user_id, &mut tx).await?;
+
+  sqlx::query(
+    r#"
+    INSERT INTO provisioned_pattern_rules
+      (pattern, classification_type, is_matching_site, confidence, reasoning,
+       source_id, valid_on, valid_until, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    "#,
+  )
+  .bind(pattern)
+  .bind(classification_type)
+  .bind(is_matching_site)
+  .bind(confidence as f32)
+  .bind(reasoning)
+  .bind(source_id)
+  .bind(now)
+  .bind(never_expires_at(now))
+  .execute(&mut *tx)
+  .await?;
+
+  tx.commit().await?;
+
+  let rule = ActiveProvisionedPattern {
+    id: 0,
+    pattern: pattern.to_string(),
+    classification_type: classification_type.to_string(),
+    is_matching_site,
+    confidence: confidence as f32,
+    reasoning: Some(reasoning.to_string()),
+    source_id: Some(source_id),
+  };
+
+  let re = regex::Regex::new(pattern)
+    .map_err(|e| DbError::RegexError(e.to_string()))?;
+
+  let all_domains: Vec<String> =
+    sqlx::query_scalar("SELECT domain FROM domains")
+      .fetch_all(pool)
+      .await?;
+
+  for domain in all_domains {
+    if re.is_match(&domain) {
+      apply_pattern_classification(pool, &domain, classification_type, &rule)
+        .await?;
+    }
+  }
+
+  Ok(source_id)
 }
 
 /// Rebuild the `domain_classifications` projection from the event log.

@@ -460,6 +460,39 @@ impl ClassificationSource {
     Ok(result.0)
   }
 
+  /// Get or create a source record for a provisioned regex pattern.
+  /// Keyed by `"<pattern>|<classification_type>"` in `label` so that each
+  /// unique `(pattern, classification_type)` pair gets its own source row.
+  pub async fn ensure_provisioned_pattern(
+    pattern: &str,
+    classification_type: &str,
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<i32, sqlx::Error> {
+    let label = format!("{}|{}", pattern, classification_type);
+    sqlx::query(
+      r#"
+      INSERT INTO classification_sources (source_type, label, created_at)
+      VALUES ('provisioned_pattern', $1, NOW())
+      ON CONFLICT (source_type, label) WHERE label IS NOT NULL DO NOTHING
+      "#,
+    )
+    .bind(&label)
+    .execute(&mut **tx)
+    .await?;
+
+    let result: (i32,) = sqlx::query_as(
+      r#"
+      SELECT id FROM classification_sources
+      WHERE source_type = 'provisioned_pattern' AND label = $1
+      "#,
+    )
+    .bind(&label)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(result.0)
+  }
+
   /// Get or create a source record for the given exclude-rule pattern.
   /// `source_type` must be `"config_exclude_rule"` or `"manual_exclude_rule"`.
   /// Two classifications that matched the same pattern share one source row.
@@ -685,4 +718,35 @@ impl ErroredClassification {
 pub struct Domain {
   pub domain: String,
   pub last_updated: DateTime<Utc>,
+}
+
+/// An active provisioned pattern rule, as returned by the DB.
+/// Used by the queue-processor to skip LLM classification for matching domains.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ActiveProvisionedPattern {
+  pub id: i32,
+  pub pattern: String,
+  pub classification_type: String,
+  pub is_matching_site: bool,
+  pub confidence: f32,
+  pub reasoning: Option<String>,
+  pub source_id: Option<i32>,
+}
+
+impl ActiveProvisionedPattern {
+  /// Fetch all currently-active pattern rules from the database.
+  pub async fn fetch_all_active(
+    pool: &PgPool,
+  ) -> Result<Vec<Self>, sqlx::Error> {
+    sqlx::query_as(
+      r#"
+      SELECT id, pattern, classification_type, is_matching_site,
+             confidence, reasoning, source_id
+      FROM provisioned_pattern_rules
+      WHERE valid_on <= NOW() AND valid_until > NOW()
+      "#,
+    )
+    .fetch_all(pool)
+    .await
+  }
 }

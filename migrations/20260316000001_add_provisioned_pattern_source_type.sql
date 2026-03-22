@@ -1,0 +1,11 @@
+-- Add 'provisioned_pattern' to classification_source_type.
+-- Provisioned pattern classifications are declared in NixOS configuration
+-- (or via admin CLI) as regex rules that match whole families of domains.
+-- On reconcile, all existing domains matching the regex are immediately
+-- reclassified without invoking the LLM.
+--
+-- The table that stores active pattern rules (provisioned_pattern_rules) is
+-- created in the next migration because PostgreSQL requires newly added enum
+-- values to be committed before they can appear in expressions that reference
+-- the enum type.
+ALTER TYPE classification_source_type ADD VALUE IF NOT EXISTS 'provisioned_pattern';

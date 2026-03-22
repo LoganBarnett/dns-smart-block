@@ -15,6 +15,7 @@ chrono = { version = "*", features = ["serde"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
+regex = "1"
 tokio = { workspace = true }
 
 [dev-dependencies]
