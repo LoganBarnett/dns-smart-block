@@ -469,6 +469,13 @@ in {
     serviceUser = "dns_smart_block";
     serviceGroup = "dns_smart_block";
 
+    # Whether to actually use the Unix domain socket for the public server.
+    # Blocky fetches blocklists over plain HTTP (host:port only), so we fall
+    # back to TCP automatically when the Blocky integration is enabled.
+    usePublicSocket =
+      cfg.blocklistServer.publicSocket != null
+      && !cfg.integrations.blocky.enable;
+
     # Construct database URL.
     databaseUrl = let
       rawUrl =
@@ -587,13 +594,13 @@ in {
 
     # Create the socket directory before the socket unit tries to bind.
     systemd.tmpfiles.rules = lib.mkIf
-      (cfg.blocklistServer.enable && cfg.blocklistServer.publicSocket != null)
+      (cfg.blocklistServer.enable && usePublicSocket)
       [ "d ${dirOf cfg.blocklistServer.publicSocket} 0750 ${serviceUser} ${serviceGroup} -" ];
 
     # Socket unit: systemd creates and holds the Unix domain socket, then
     # passes the open file descriptor to the service on first activation.
     systemd.sockets.dns-smart-block-blocklist-server =
-      lib.mkIf (cfg.blocklistServer.enable && cfg.blocklistServer.publicSocket != null) {
+      lib.mkIf (cfg.blocklistServer.enable && usePublicSocket) {
         description = "DNS Smart Block blocklist server Unix domain socket";
         wantedBy = [ "sockets.target" ];
         socketConfig = {
@@ -759,7 +766,7 @@ in {
           # Health-check command differs depending on whether the public server
           # is on a Unix socket or TCP.
           publicHealthCheck =
-            if cfg.blocklistServer.publicSocket != null
+            if usePublicSocket
             then "${pkgs.curl}/bin/curl -sf --unix-socket '${cfg.blocklistServer.publicSocket}' http://localhost/health"
             else "${pkgs.curl}/bin/curl -sf 'http://127.0.0.1:${toString cfg.blocklistServer.publicBindPort}/health'";
 
@@ -840,12 +847,12 @@ in {
         after = [ "network.target" ]
                 ++ lib.optional cfg.database.enable "postgresql.service"
                 ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service"
-                ++ lib.optional (cfg.blocklistServer.publicSocket != null)
+                ++ lib.optional usePublicSocket
                      "dns-smart-block-blocklist-server.socket";
         wants = lib.optional cfg.database.enable "postgresql.service"
                 ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service";
         requires = lib.optional cfg.database.enable "postgresql.service"
-                   ++ lib.optional (cfg.blocklistServer.publicSocket != null)
+                   ++ lib.optional usePublicSocket
                         "dns-smart-block-blocklist-server.socket";
 
         serviceConfig = {
@@ -856,7 +863,7 @@ in {
 
           ExecStart = let
             publicListen =
-              if cfg.blocklistServer.publicSocket != null
+              if usePublicSocket
               then "sd-listen"
               else "${cfg.blocklistServer.publicBindHost}:${toString cfg.blocklistServer.publicBindPort}";
             adminListen =
