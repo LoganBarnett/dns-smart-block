@@ -293,6 +293,153 @@ These DNS servers support direct HTTP blocklist URLs:
 - Pi-hole: Add ~http://localhost:3000/blocklist?type=gaming~ to blocklists.
 - AdGuard Home: Add to DNS blocklists in settings.
 
+* Provisioned Classifications
+
+In addition to LLM-based classification, you can declare authoritative
+classification rules that bypass the LLM entirely.  These come in two forms:
+
+- *Exact-domain rules* - Apply a classification to one specific domain.
+- *Pattern rules* - Apply a classification to every domain whose name matches
+  a regex.  When a pattern is reconciled, all existing domains in the database
+  that match are immediately reclassified and any active LLM classifications
+  for those domains are expired.  Future matching domains skip the LLM
+  entirely.
+
+Provisioned rules never expire (they use a permanent TTL) and take precedence
+over LLM results.  Admin-sourced rules (set via the CLI) are preserved and
+never overwritten by a reconcile run.
+
+** CLI
+
+The ~dns-smart-block-cli domain~ sub-commands manage provisioned
+classifications:
+
+*** Reconcile from a JSON file
+
+Apply a desired set of provisioned rules (idempotent, safe to run repeatedly):
+
+#+begin_src sh :exports code
+dns-smart-block-cli domain reconcile \
+  --file /path/to/provisioned.json
+#+end_src
+
+The JSON file must be an array.  Each element has exactly one of ~domain~ or
+~pattern~, plus the required classification fields:
+
+#+begin_src json :exports code
+[
+  {
+    "domain": "example.com",
+    "classification_type": "gaming",
+    "is_matching_site": false,
+    "confidence": 1.0,
+    "reasoning": "Explicitly allowed."
+  },
+  {
+    "pattern": "^(.*\\.)?dndbeyond\\.com$",
+    "classification_type": "gaming",
+    "is_matching_site": false,
+    "confidence": 1.0,
+    "reasoning": "DnD Beyond is allowed for guests."
+  }
+]
+#+end_src
+
+Rules not present in the file are expired on the next reconcile run.
+
+*** Classify a single domain or pattern (admin override)
+
+#+begin_src sh :exports code
+# Exact domain — requires --ensure to make the upsert intent explicit
+dns-smart-block-cli domain classify \
+  --domain "example.com" \
+  --classification-type gaming \
+  --is-matching-site false \
+  --confidence 1.0 \
+  --reasoning "Allowed site" \
+  --ensure
+
+# Regex pattern — applies to all matching domains immediately
+dns-smart-block-cli domain classify \
+  --pattern '^(.*\.)?dndbeyond\.com$' \
+  --classification-type gaming \
+  --is-matching-site false \
+  --ensure
+#+end_src
+
+~--domain~ and ~--pattern~ are mutually exclusive.
+
+** NixOS module
+
+The NixOS module supports declarative provisioned classifications and
+pattern-based exclusions:
+
+#+begin_src nix :exports code
+services.dns-smart-block = {
+  # Declare specific domain or pattern rules.  Each entry requires exactly
+  # one of `domain` or `pattern`.
+  provisionedClassifications = [
+    {
+      domain = "example.com";
+      classificationType = "gaming";
+      isMatchingSite = false;
+      confidence = 1.0;
+      reasoning = "Explicitly allowed.";
+    }
+    {
+      pattern = ''^(.*\.)?dndbeyond\.com$'';
+      classificationType = "gaming";
+      isMatchingSite = false;
+      confidence = 1.0;
+      reasoning = "DnD Beyond is allowed for guests.";
+    }
+  ];
+
+  # Exclude entire domain families from LLM classification.
+  # Each entry is converted to a provisioned pattern rule at reconcile time.
+  # Leading-dot notation (.example.com) and bare names (example.com) both
+  # match the root domain and all subdomains.
+  excludeSuffixes = [
+    ".internal.corp"
+    "cdn.example.net"
+  ];
+};
+#+end_src
+
+The reconcile service runs once at NixOS activation whenever
+~provisionedClassifications~ or ~excludeSuffixes~ is non-empty.
+
+** Admin HTTP API
+
+The blocklist-server exposes an admin API on port 8080.
+
+*** POST /reconcile
+
+Apply a desired set of provisioned rules from a JSON body (same format as
+the CLI reconcile file).
+
+#+begin_src sh :exports code
+curl -X POST http://localhost:8080/reconcile \
+  -H 'Content-Type: application/json' \
+  -d '[{"domain":"example.com","classification_type":"gaming","is_matching_site":false,"confidence":1.0}]'
+#+end_src
+
+*** POST /classify
+
+Apply an admin classification for a single domain or pattern.
+
+#+begin_src sh :exports code
+# Exact domain
+curl -X POST http://localhost:8080/classify \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"example.com","classification_type":"gaming","is_matching_site":false,"confidence":1.0,"reasoning":"Allowed"}'
+
+# Regex pattern
+curl -X POST http://localhost:8080/classify \
+  -H 'Content-Type: application/json' \
+  -d '{"pattern":"^(.*\\.)?example\\.com$","classification_type":"gaming","is_matching_site":false,"confidence":1.0}'
+#+end_src
+
 * Host Configuration
 
 ** Nix / NixOS
@@ -416,9 +563,13 @@ DNS Smart Block uses PostgreSQL with an event-sourced architecture.
 ** Tables
 
 - *prompts* - Stores LLM prompts with SHA256 hash deduplication.
+- *classification_sources* - Provenance discriminator for all classification
+  rows: ~llm_prompt~, ~admin~, ~provisioned_pattern~.
 - *domain_classification_events* - Immutable event log (queued, classifying, classified, error).
 - *domains* - Projection table for fast domain lookups.
 - *domain_classifications* - Classification results with TTL (valid_on, valid_until).
+- *provisioned_pattern_rules* - Active regex pattern rules used by the
+  queue-processor to skip LLM classification for matching domains.
 
 ** Migrations
 
