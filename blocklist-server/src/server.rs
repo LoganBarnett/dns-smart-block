@@ -21,7 +21,6 @@ use prometheus::{Encoder, TextEncoder};
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
@@ -902,34 +901,59 @@ pub async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
 
   let state = AppState { pool, nats };
 
-  let public_addr: SocketAddr = args
-    .public_bind_address
-    .parse()
-    .map_err(|e| format!("Invalid public bind address: {}", e))?;
+  let public_listen = args
+    .public_listen
+    .parse::<tokio_listener::ListenerAddress>()
+    .map_err(|e| format!("Invalid public listen address: {}", e))?;
 
-  let admin_addr: SocketAddr = args
-    .admin_bind_address
-    .parse()
-    .map_err(|e| format!("Invalid admin bind address: {}", e))?;
+  let admin_listen = args
+    .admin_listen
+    .parse::<tokio_listener::ListenerAddress>()
+    .map_err(|e| format!("Invalid admin listen address: {}", e))?;
 
-  info!("Public server listening on {}", public_addr);
-  info!("Admin server listening on {}", admin_addr);
+  info!("Public server listening on {}", public_listen);
+  info!("Admin server listening on {}", admin_listen);
 
-  let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
+  let admin_listener = tokio_listener::Listener::bind(
+    &admin_listen,
+    &tokio_listener::SystemOptions::default(),
+    &tokio_listener::UserOptions::default(),
+  )
+  .await
+  .map_err(|e| {
+    format!("Failed to bind admin listener to {}: {}", admin_listen, e)
+  })?;
+
   let admin_state = state.clone();
   tokio::spawn(async move {
-    if let Err(e) = axum::serve(admin_listener, admin_router(admin_state)).await
+    if let Err(e) = tokio_listener::axum07::serve(
+      admin_listener,
+      admin_router(admin_state).into_make_service(),
+    )
+    .await
     {
       error!("Admin server error: {}", e);
     }
   });
 
-  let public_listener = tokio::net::TcpListener::bind(public_addr).await?;
+  let public_listener = tokio_listener::Listener::bind(
+    &public_listen,
+    &tokio_listener::SystemOptions::default(),
+    &tokio_listener::UserOptions::default(),
+  )
+  .await
+  .map_err(|e| {
+    format!("Failed to bind public listener to {}: {}", public_listen, e)
+  })?;
 
   dns_smart_block_common::systemd::notify_ready();
   dns_smart_block_common::systemd::spawn_watchdog();
 
-  axum::serve(public_listener, public_router(state)).await?;
+  tokio_listener::axum07::serve(
+    public_listener,
+    public_router(state).into_make_service(),
+  )
+  .await?;
 
   Ok(())
 }

@@ -375,16 +375,29 @@ in {
         description = "Enable HTTP blocklist server for serving DNS blocklists";
       };
 
+      publicSocket = mkOption {
+        type = types.nullOr types.path;
+        default = "/run/dns-smart-block/public.sock";
+        description = ''
+          Path for the Unix domain socket used by the public server.  When
+          set, systemd socket activation is used and publicBindHost /
+          publicBindPort are ignored.  Set to null to use TCP instead.
+
+          Services (e.g. nginx, Blocky) that connect to this socket must be
+          members of the service group to be granted access.
+        '';
+      };
+
       publicBindHost = mkOption {
         type = types.str;
         default = "0.0.0.0";
-        description = "Host to bind the public server to (blocklist, metrics, health)";
+        description = "Host to bind the public server to.  Ignored when publicSocket is set.";
       };
 
       publicBindPort = mkOption {
         type = types.port;
         default = 3000;
-        description = "Port to bind the public server to (blocklist, metrics, health)";
+        description = "Port to bind the public server to.  Ignored when publicSocket is set.";
       };
 
       adminBindHost = mkOption {
@@ -572,6 +585,28 @@ in {
       }];
     };
 
+    # Create the socket directory before the socket unit tries to bind.
+    systemd.tmpfiles.rules = lib.mkIf
+      (cfg.blocklistServer.enable && cfg.blocklistServer.publicSocket != null)
+      [ "d ${dirOf cfg.blocklistServer.publicSocket} 0750 ${serviceUser} ${serviceGroup} -" ];
+
+    # Socket unit: systemd creates and holds the Unix domain socket, then
+    # passes the open file descriptor to the service on first activation.
+    systemd.sockets.dns-smart-block-blocklist-server =
+      lib.mkIf (cfg.blocklistServer.enable && cfg.blocklistServer.publicSocket != null) {
+        description = "DNS Smart Block blocklist server Unix domain socket";
+        wantedBy = [ "sockets.target" ];
+        socketConfig = {
+          ListenStream = cfg.blocklistServer.publicSocket;
+          SocketUser = serviceUser;
+          SocketGroup = serviceGroup;
+          # 0660: accessible to the service user and group only.  Add the
+          # connecting service's user to the service group to grant access.
+          SocketMode = "0660";
+          Accept = false;
+        };
+      };
+
     # Queue Processor Service (single unified service).
     systemd.services = {
       # Single queue processor that runs all classifiers.
@@ -721,7 +756,12 @@ in {
         mkIf (cfg.blocklistServer.enable
           && (cfg.provisionedClassifications != [] || cfg.excludeSuffixes != [])) (let
           adminUrl = "http://${cfg.blocklistServer.adminBindHost}:${toString cfg.blocklistServer.adminBindPort}";
-          publicHealthUrl = "http://127.0.0.1:${toString cfg.blocklistServer.publicBindPort}/health";
+          # Health-check command differs depending on whether the public server
+          # is on a Unix socket or TCP.
+          publicHealthCheck =
+            if cfg.blocklistServer.publicSocket != null
+            then "${pkgs.curl}/bin/curl -sf --unix-socket '${cfg.blocklistServer.publicSocket}' http://localhost/health"
+            else "${pkgs.curl}/bin/curl -sf 'http://127.0.0.1:${toString cfg.blocklistServer.publicBindPort}/health'";
 
           # Convert an excludeSuffixes entry to a provisioned pattern entry.
           # ".example.com" or "example.com" → "^(.*\.)?example\.com$"
@@ -772,7 +812,7 @@ in {
 
             ExecStart = pkgs.writeShellScript "dns-smart-block-provisioned-classifications" ''
               # Poll until the blocklist server's public health endpoint responds.
-              until ${pkgs.curl}/bin/curl -sf '${publicHealthUrl}' > /dev/null 2>&1; do
+              until ${publicHealthCheck} > /dev/null 2>&1; do
                 sleep 1
               done
               ${packages.cli}/bin/dns-smart-block-cli \
@@ -799,10 +839,14 @@ in {
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ]
                 ++ lib.optional cfg.database.enable "postgresql.service"
-                ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service";
+                ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service"
+                ++ lib.optional (cfg.blocklistServer.publicSocket != null)
+                     "dns-smart-block-blocklist-server.socket";
         wants = lib.optional cfg.database.enable "postgresql.service"
                 ++ lib.optional cfg.nats.enable "dns-smart-block-nats-init.service";
-        requires = lib.optional cfg.database.enable "postgresql.service";
+        requires = lib.optional cfg.database.enable "postgresql.service"
+                   ++ lib.optional (cfg.blocklistServer.publicSocket != null)
+                        "dns-smart-block-blocklist-server.socket";
 
         serviceConfig = {
           Type = "notify";
@@ -811,13 +855,17 @@ in {
           Group = serviceGroup;
 
           ExecStart = let
-            publicBindAddress = "${cfg.blocklistServer.publicBindHost}:${toString cfg.blocklistServer.publicBindPort}";
-            adminBindAddress = "${cfg.blocklistServer.adminBindHost}:${toString cfg.blocklistServer.adminBindPort}";
+            publicListen =
+              if cfg.blocklistServer.publicSocket != null
+              then "sd-listen"
+              else "${cfg.blocklistServer.publicBindHost}:${toString cfg.blocklistServer.publicBindPort}";
+            adminListen =
+              "${cfg.blocklistServer.adminBindHost}:${toString cfg.blocklistServer.adminBindPort}";
             args = lib.concatStringsSep " " ([
               "${packages.blocklist-server}/bin/dns-smart-block-blocklist-server"
               "--database-url '${databaseUrl}'"
-              "--public-bind-address '${publicBindAddress}'"
-              "--admin-bind-address '${adminBindAddress}'"
+              "--public-listen '${publicListen}'"
+              "--admin-listen '${adminListen}'"
               "--nats-url '${cfg.nats.url}'"
               "--nats-subject '${cfg.nats.subject}'"
             ] ++ lib.optionals (cfg.database.passwordFile != null) [

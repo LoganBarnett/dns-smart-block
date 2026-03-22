@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 dns-smart-block-common = { path = "../common" }
 tokio = { version = "*", features = ["full"] }
+tokio-listener = { workspace = true }
 axum = "0.7"
 tower = "*"
 tower-http = { version = "*", features = ["trace", "cors"] }

@@ -17,13 +17,17 @@ pub struct CliArgs {
   #[arg(long, env = "DATABASE_PASSWORD_FILE")]
   pub database_password_file: Option<PathBuf>,
 
-  /// Address to bind the public server to (blocklist, metrics, health)
-  #[arg(long, env = "PUBLIC_BIND_ADDRESS", default_value = "0.0.0.0:3000")]
-  pub public_bind_address: String,
+  /// Address to listen on for the public server (blocklist, metrics, health):
+  /// host:port for TCP, /path/to.sock for Unix socket, or sd-listen for
+  /// systemd socket activation.
+  #[arg(long, env = "PUBLIC_LISTEN", default_value = "0.0.0.0:3000")]
+  pub public_listen: String,
 
-  /// Address to bind the admin server to (classifications, reprojection)
-  #[arg(long, env = "ADMIN_BIND_ADDRESS", default_value = "127.0.0.1:8080")]
-  pub admin_bind_address: String,
+  /// Address to listen on for the admin server (classifications, reprojection):
+  /// host:port for TCP, /path/to.sock for Unix socket, or sd-listen for
+  /// systemd socket activation.
+  #[arg(long, env = "ADMIN_LISTEN", default_value = "127.0.0.1:8080")]
+  pub admin_listen: String,
 
   /// NATS server URL for requeueing errored domains (optional)
   #[arg(long, env = "NATS_URL")]
