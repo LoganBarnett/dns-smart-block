@@ -1,7 +1,9 @@
 use dns_smart_block_common::db::{
-  ClassificationSource, PromptInsert, ProvisionedEntry,
-  apply_admin_classification, classification_store, fetch_all_override,
-  reconcile_provisioned_classifications,
+  ActiveProvisionedPattern, ClassificationSource, PromptInsert,
+  ProvisionedEntry, apply_admin_classification,
+  apply_admin_pattern_classification, apply_pattern_classification,
+  classification_store, fetch_all_override, reconcile_all_provisioned,
+  reconcile_provisioned_classifications, reconcile_provisioned_patterns,
 };
 use dns_smart_block_queue_processor::db::{
   exclude_rule_classify, insert_event,
@@ -24,6 +26,10 @@ async fn setup_test_db() -> (dns_smart_block_common::test_db::TestDb, PgPool) {
     .await
     .unwrap();
   sqlx::query("DELETE FROM domains")
+    .execute(&pool)
+    .await
+    .unwrap();
+  sqlx::query("DELETE FROM provisioned_pattern_rules")
     .execute(&pool)
     .await
     .unwrap();
@@ -697,5 +703,505 @@ async fn test_reconcile_singleton_source_row() {
   assert_eq!(
     source_count, 1,
     "all reconcile runs must share one provisioned source row"
+  );
+}
+
+// ── provisioned pattern rule tests ──────────────────────────────────────
+
+fn pattern_entry(pattern: &str) -> ProvisionedEntry {
+  ProvisionedEntry {
+    domain: None,
+    pattern: Some(pattern.to_string()),
+    classification_type: "gaming".to_string(),
+    is_matching_site: true,
+    confidence: 1.0,
+    reasoning: Some("Pattern match".to_string()),
+  }
+}
+
+/// Insert a domain directly into the domains table for pattern tests.
+async fn seed_domain(pool: &PgPool, domain: &str) {
+  sqlx::query(
+    "INSERT INTO domains (domain) VALUES ($1) ON CONFLICT DO NOTHING",
+  )
+  .bind(domain)
+  .execute(pool)
+  .await
+  .unwrap();
+}
+
+/// `fetch_all_active` returns pattern rules with valid time windows.
+#[tokio::test]
+#[serial]
+async fn test_fetch_all_active_patterns() {
+  let (_db, pool) = setup_test_db().await;
+
+  let desired = vec![pattern_entry(r"^(.*\.)?example\.com$")];
+  reconcile_provisioned_patterns(&pool, &desired)
+    .await
+    .expect("reconcile failed");
+
+  let active = ActiveProvisionedPattern::fetch_all_active(&pool)
+    .await
+    .expect("fetch_all_active failed");
+
+  assert_eq!(active.len(), 1);
+  assert_eq!(active[0].pattern, r"^(.*\.)?example\.com$");
+  assert_eq!(active[0].classification_type, "gaming");
+  assert!(active[0].is_matching_site);
+  assert!(active[0].source_id.is_some());
+}
+
+/// `fetch_all_active` excludes expired pattern rules.
+#[tokio::test]
+#[serial]
+async fn test_fetch_all_active_excludes_expired() {
+  let (_db, pool) = setup_test_db().await;
+
+  let desired = vec![pattern_entry(r"\.expired\.com$")];
+  reconcile_provisioned_patterns(&pool, &desired)
+    .await
+    .unwrap();
+
+  // Manually expire the rule.
+  sqlx::query(
+    "UPDATE provisioned_pattern_rules SET valid_until = NOW() - INTERVAL '1 day'",
+  )
+  .execute(&pool)
+  .await
+  .unwrap();
+
+  let active = ActiveProvisionedPattern::fetch_all_active(&pool)
+    .await
+    .unwrap();
+  assert!(active.is_empty(), "expired rules must not be returned");
+}
+
+/// `apply_pattern_classification` creates a classification and event for a
+/// domain, using the provisioned-pattern source.
+#[tokio::test]
+#[serial]
+async fn test_apply_pattern_classification() {
+  let (_db, pool) = setup_test_db().await;
+
+  // Create a source row for the pattern.
+  let mut tx = pool.begin().await.unwrap();
+  let source_id = ClassificationSource::ensure_provisioned_pattern(
+    r"\.gaming\.com$",
+    "gaming",
+    &mut tx,
+  )
+  .await
+  .unwrap();
+  tx.commit().await.unwrap();
+
+  let rule = ActiveProvisionedPattern {
+    id: 0,
+    pattern: r"\.gaming\.com$".to_string(),
+    classification_type: "gaming".to_string(),
+    is_matching_site: true,
+    confidence: 0.99,
+    reasoning: Some("Matched gaming pattern".to_string()),
+    source_id: Some(source_id),
+  };
+
+  apply_pattern_classification(&pool, "sub.gaming.com", "gaming", &rule)
+    .await
+    .expect("apply_pattern_classification failed");
+
+  // Classification must exist with model = "provisioned-pattern".
+  let row = sqlx::query(
+    "SELECT model, is_matching_site, confidence, source_id
+     FROM domain_classifications
+     WHERE domain = 'sub.gaming.com' AND classification_type = 'gaming'",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("classification not found");
+
+  assert_eq!(
+    row.try_get::<String, _>("model").unwrap(),
+    "provisioned-pattern"
+  );
+  assert!(row.try_get::<bool, _>("is_matching_site").unwrap());
+  assert!((row.try_get::<f32, _>("confidence").unwrap() - 0.99).abs() < 0.01);
+  assert_eq!(
+    row.try_get::<Option<i32>, _>("source_id").unwrap(),
+    Some(source_id)
+  );
+
+  // A classified event must be written with matched_pattern in action_data.
+  let event_data: serde_json::Value = sqlx::query_scalar(
+    "SELECT action_data FROM domain_classification_events
+     WHERE domain = 'sub.gaming.com' AND action = 'classified'",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("event not found");
+
+  assert_eq!(event_data["matched_pattern"], r"\.gaming\.com$");
+  assert_eq!(event_data["model"], "provisioned-pattern");
+}
+
+/// `apply_pattern_classification` expires existing LLM classifications for
+/// the same (domain, classification_type).
+#[tokio::test]
+#[serial]
+async fn test_apply_pattern_expires_llm_classifications() {
+  let (_db, pool) = setup_test_db().await;
+
+  let domain = "llm-then-pattern.com";
+
+  // Create an LLM classification first.
+  classification_store(
+    &pool,
+    domain,
+    "gaming",
+    true,
+    0.85,
+    "LLM says gaming",
+    "test-model",
+    "test prompt",
+    "sha256:test",
+    30,
+  )
+  .await
+  .expect("classification_store failed");
+
+  // Verify the LLM classification is active.
+  let active_before: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM domain_classifications
+     WHERE domain = $1 AND classification_type = 'gaming' AND valid_until > NOW()",
+  )
+  .bind(domain)
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+  assert_eq!(active_before, 1, "LLM classification must be active");
+
+  // Now apply a pattern classification.
+  let mut tx = pool.begin().await.unwrap();
+  let source_id = ClassificationSource::ensure_provisioned_pattern(
+    r"llm-then-pattern",
+    "gaming",
+    &mut tx,
+  )
+  .await
+  .unwrap();
+  tx.commit().await.unwrap();
+
+  let rule = ActiveProvisionedPattern {
+    id: 0,
+    pattern: "llm-then-pattern".to_string(),
+    classification_type: "gaming".to_string(),
+    is_matching_site: true,
+    confidence: 1.0,
+    reasoning: Some("Pattern override".to_string()),
+    source_id: Some(source_id),
+  };
+
+  apply_pattern_classification(&pool, domain, "gaming", &rule)
+    .await
+    .expect("apply_pattern_classification failed");
+
+  // Only the pattern classification should be active; LLM one expired.
+  let active_rows: Vec<(String,)> = sqlx::query_as(
+    "SELECT model FROM domain_classifications
+     WHERE domain = $1 AND classification_type = 'gaming' AND valid_until > NOW()",
+  )
+  .bind(domain)
+  .fetch_all(&pool)
+  .await
+  .unwrap();
+
+  assert_eq!(active_rows.len(), 1, "only pattern classification active");
+  assert_eq!(active_rows[0].0, "provisioned-pattern");
+}
+
+/// `reconcile_provisioned_patterns` inserts new pattern rules and
+/// retroactively applies them to existing matching domains.
+#[tokio::test]
+#[serial]
+async fn test_reconcile_patterns_inserts_and_applies() {
+  let (_db, pool) = setup_test_db().await;
+
+  // Seed some domains before reconcile.
+  seed_domain(&pool, "sub.gaming-site.com").await;
+  seed_domain(&pool, "other.gaming-site.com").await;
+  seed_domain(&pool, "unrelated.org").await;
+
+  let desired = vec![pattern_entry(r"^(.*\.)?gaming-site\.com$")];
+
+  let result = reconcile_provisioned_patterns(&pool, &desired)
+    .await
+    .expect("reconcile failed");
+
+  assert_eq!(result.upserted, 1);
+  assert_eq!(result.skipped, 0);
+  assert_eq!(result.expired, 0);
+
+  // Both matching domains should now have classifications.
+  for domain in &["sub.gaming-site.com", "other.gaming-site.com"] {
+    let model: String = sqlx::query_scalar(
+      "SELECT model FROM domain_classifications
+       WHERE domain = $1 AND classification_type = 'gaming' AND valid_until > NOW()",
+    )
+    .bind(domain)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or_else(|_| panic!("classification missing for {domain}"));
+
+    assert_eq!(model, "provisioned-pattern");
+  }
+
+  // The non-matching domain should have no classification.
+  let unrelated_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM domain_classifications WHERE domain = 'unrelated.org'",
+  )
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+  assert_eq!(
+    unrelated_count, 0,
+    "non-matching domain must not be classified"
+  );
+
+  // Pattern rule must exist in provisioned_pattern_rules.
+  let rule_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM provisioned_pattern_rules WHERE pattern = $1",
+  )
+  .bind(r"^(.*\.)?gaming-site\.com$")
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+  assert_eq!(rule_count, 1);
+}
+
+/// Running reconcile a second time with the same pattern skips it.
+#[tokio::test]
+#[serial]
+async fn test_reconcile_patterns_skips_unchanged() {
+  let (_db, pool) = setup_test_db().await;
+
+  let desired = vec![pattern_entry(r"\.stable-pattern\.com$")];
+
+  reconcile_provisioned_patterns(&pool, &desired)
+    .await
+    .unwrap();
+
+  let result = reconcile_provisioned_patterns(&pool, &desired)
+    .await
+    .expect("second reconcile failed");
+
+  assert_eq!(result.upserted, 0);
+  assert_eq!(result.skipped, 1, "unchanged pattern must be skipped");
+  assert_eq!(result.expired, 0);
+}
+
+/// Removing a pattern from the desired set expires its rule row.
+#[tokio::test]
+#[serial]
+async fn test_reconcile_patterns_expires_removed() {
+  let (_db, pool) = setup_test_db().await;
+
+  let initial = vec![
+    pattern_entry(r"\.keep\.com$"),
+    pattern_entry(r"\.remove\.com$"),
+  ];
+  reconcile_provisioned_patterns(&pool, &initial)
+    .await
+    .unwrap();
+
+  let reduced = vec![pattern_entry(r"\.keep\.com$")];
+  let result = reconcile_provisioned_patterns(&pool, &reduced)
+    .await
+    .expect("reduce reconcile failed");
+
+  assert_eq!(result.expired, 1, "removed pattern must be expired");
+  assert_eq!(result.skipped, 1);
+
+  // The removed pattern rule should no longer appear as active.
+  let active = ActiveProvisionedPattern::fetch_all_active(&pool)
+    .await
+    .unwrap();
+  assert_eq!(active.len(), 1);
+  assert_eq!(active[0].pattern, r"\.keep\.com$");
+}
+
+/// Changing a pattern entry's values causes expire + re-insert.
+#[tokio::test]
+#[serial]
+async fn test_reconcile_patterns_updates_changed() {
+  let (_db, pool) = setup_test_db().await;
+
+  let initial = vec![pattern_entry(r"\.change\.com$")];
+  reconcile_provisioned_patterns(&pool, &initial)
+    .await
+    .unwrap();
+
+  let updated = vec![ProvisionedEntry {
+    domain: None,
+    pattern: Some(r"\.change\.com$".to_string()),
+    classification_type: "gaming".to_string(),
+    is_matching_site: false, // changed
+    confidence: 0.5,         // changed
+    reasoning: Some("Updated".to_string()),
+  }];
+
+  let result = reconcile_provisioned_patterns(&pool, &updated)
+    .await
+    .expect("update reconcile failed");
+
+  assert_eq!(result.upserted, 1, "changed pattern must be re-upserted");
+  assert_eq!(result.skipped, 0);
+
+  // Only one active rule should exist.
+  let active = ActiveProvisionedPattern::fetch_all_active(&pool)
+    .await
+    .unwrap();
+  assert_eq!(active.len(), 1);
+  assert!(!active[0].is_matching_site, "updated value must apply");
+  assert!((active[0].confidence - 0.5).abs() < 0.01);
+}
+
+/// `reconcile_all_provisioned` routes domain entries to domain reconcile
+/// and pattern entries to pattern reconcile.
+#[tokio::test]
+#[serial]
+async fn test_reconcile_all_mixed_entries() {
+  let (_db, pool) = setup_test_db().await;
+
+  seed_domain(&pool, "matched.example.com").await;
+
+  let entries = vec![
+    gaming_entry("exact-domain.com"),
+    pattern_entry(r"^(.*\.)?example\.com$"),
+  ];
+
+  let result = reconcile_all_provisioned(&pool, &entries)
+    .await
+    .expect("reconcile_all failed");
+
+  assert_eq!(
+    result.upserted, 2,
+    "one domain + one pattern should be upserted"
+  );
+
+  // Domain-based entry should have model = "provisioned".
+  let domain_model: String = sqlx::query_scalar(
+    "SELECT model FROM domain_classifications
+     WHERE domain = 'exact-domain.com' AND valid_until > NOW()",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("domain classification missing");
+  assert_eq!(domain_model, "provisioned");
+
+  // Pattern-based entry should have classified the seeded domain.
+  let pattern_model: String = sqlx::query_scalar(
+    "SELECT model FROM domain_classifications
+     WHERE domain = 'matched.example.com' AND valid_until > NOW()",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("pattern classification missing");
+  assert_eq!(pattern_model, "provisioned-pattern");
+}
+
+/// `apply_admin_pattern_classification` creates an admin-sourced pattern rule
+/// that survives a provisioned reconcile run.
+#[tokio::test]
+#[serial]
+async fn test_admin_pattern_survives_reconcile() {
+  let (_db, pool) = setup_test_db().await;
+
+  seed_domain(&pool, "admin-matched.test.com").await;
+
+  // Apply admin pattern (user_id = 1, the implicit admin).
+  let source_id = apply_admin_pattern_classification(
+    &pool,
+    r"\.test\.com$",
+    "gaming",
+    true,
+    0.95,
+    "Admin-applied pattern",
+    1,
+  )
+  .await
+  .expect("apply_admin_pattern failed");
+
+  assert!(source_id > 0);
+
+  // The domain should be classified.
+  let model: String = sqlx::query_scalar(
+    "SELECT model FROM domain_classifications
+     WHERE domain = 'admin-matched.test.com' AND valid_until > NOW()",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("admin pattern classification missing");
+  assert_eq!(model, "provisioned-pattern");
+
+  // Now reconcile with an empty pattern set.  Admin rules must survive.
+  let result = reconcile_provisioned_patterns(&pool, &[])
+    .await
+    .expect("reconcile failed");
+
+  // Admin rule uses 'admin' source type, not 'provisioned_pattern', so
+  // reconcile must not touch it.
+  assert_eq!(result.expired, 0, "admin pattern must not be expired");
+
+  // The admin pattern rule should still be active.
+  let rule_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM provisioned_pattern_rules
+     WHERE pattern = $1 AND valid_until > NOW()",
+  )
+  .bind(r"\.test\.com$")
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+  assert_eq!(rule_count, 1, "admin pattern rule must survive reconcile");
+}
+
+/// Provisioned pattern source rows are deduplicated by (pattern, type).
+#[tokio::test]
+#[serial]
+async fn test_provisioned_pattern_source_deduplication() {
+  let (_db, pool) = setup_test_db().await;
+
+  let desired = vec![pattern_entry(r"\.dedup\.com$")];
+
+  // Reconcile twice with the same pattern.
+  reconcile_provisioned_patterns(&pool, &desired)
+    .await
+    .unwrap();
+
+  // Change confidence to force a re-upsert, testing source dedup.
+  let changed = vec![ProvisionedEntry {
+    domain: None,
+    pattern: Some(r"\.dedup\.com$".to_string()),
+    classification_type: "gaming".to_string(),
+    is_matching_site: true,
+    confidence: 0.8,
+    reasoning: Some("Changed".to_string()),
+  }];
+  reconcile_provisioned_patterns(&pool, &changed)
+    .await
+    .unwrap();
+
+  // Only one source row should exist for this pattern.
+  let source_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(*) FROM classification_sources
+     WHERE source_type = 'provisioned_pattern'
+       AND label = $1",
+  )
+  .bind(r"\.dedup\.com$|gaming")
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+
+  assert_eq!(
+    source_count, 1,
+    "same (pattern, type) must produce exactly one source row"
   );
 }
