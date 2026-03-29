@@ -1,7 +1,214 @@
 #+title: DNS Smart Block - Tasks
 #+date: <2026-01-22 Wed>
 
-* Tasks
+* Audit <2026-03-28 Fri>
+
+Tasks from a comprehensive code audit.  Each task follows the pattern of first
+writing a test to prove the problem, then implementing the fix.
+
+** Diagrams
+
+Replace the existing ASCII d2 rendering in the README (and add new diagrams) by
+switching to SVG output via org-babel.  The ASCII renderer has known bugs with
+parallel node overlap and ~\n~ handling (see the archived d2 tickets below);
+SVG sidesteps both issues.
+
+*** TODO [#B] Replace ASCII flow diagram in README with d2 SVG
+:PROPERTIES:
+:EFFORT:   30min
+:END:
+
+The README currently has a ~#+begin_src d2~ block whose ~#+RESULTS~ is an
+ASCII rendering with broken parallel node layout.  Switch to ~:file
+diagrams/request-flow.svg :exports results~ so Emacs generates the SVG via
+~C-c C-c~.  Remove the old ASCII ~#+RESULTS~ block.
+
+*Steps:*
+1. Create ~diagrams/~ directory.
+2. Update the existing ~d2~ src block header to
+   ~#+begin_src d2 :file diagrams/request-flow.svg :exports results~.
+3. Give the block a name: ~#+name: request-flow~.
+4. Remove the ~#+RESULTS~ block with the ASCII art.
+5. Run ~emacs --batch~ (or interactively) to evaluate the block and generate
+   the SVG.
+6. Verify the SVG renders correctly.
+
+*** TODO [#B] Add event sourcing lifecycle diagram
+
+Add a named d2 diagram to CONTRIBUTING.org showing the event sourcing model:
+events table (append-only) to projection table, with the reprojection path.
+
+*Suggested content:*
+- ~domain_classification_events~ (append-only log)
+- ~domain_classifications~ (projection)
+- ~/reprojection~ admin endpoint arrow from events to projection
+- Event actions: queued, classifying, classified, error, expired
+
+*** TODO [#B] Add classification state machine diagram
+
+Add a named d2 diagram to CONTRIBUTING.org illustrating the classifier state
+machine documented in the "Classifier state machine" section.
+
+*States:* Missing, Current, Expired, Error.
+*Transitions:* classify, TTL expires, error, re-classify.
+
+*** TODO [#C] Add service deployment diagram
+
+Add a named d2 diagram to README.org showing the deployed service topology:
+DNS server, log-processor, NATS, queue-processor, classifier (subprocess),
+PostgreSQL, blocklist-server (public + admin ports), Ollama.
+
+** Production Panic Safety
+
+Rust production code must never panic.  Each task here identifies a call site
+that can panic at runtime and proposes a test-first fix.
+
+*** TODO [#A] Remove ~.expect()~ in queue-processor config lookup
+
+*File:* ~queue-processor/src/main.rs:334~
+#+begin_example
+.expect("Classifier config should exist for all classification types")
+#+end_example
+
+This panics if ~get_classifier_states~ returns a classification type that
+has no matching entry in ~config.classifiers~.  This can happen if the
+database contains stale classification types from a previous configuration.
+
+*Test first:*
+Write a test that calls the processing function with a ~states~ map
+containing a classification type not present in ~config.classifiers~.
+Assert that the function returns an error rather than panicking.
+
+*Fix:*
+Replace ~.expect()~ with ~.ok_or_else(|| ...)~ and propagate the error, or
+~continue~ with a warning log if the intent is to skip unknown types.
+
+*** TODO [#A] Remove ~.unwrap()~ on ~last_error~ in classifier retry path
+
+*File:* ~classifier/src/web_classify.rs:150~
+#+begin_example
+Err(last_error.unwrap().into())
+#+end_example
+
+After the retry loop exhausts all attempts, ~last_error~ is unwrapped.  If
+~max_retries~ is 0, the loop body never executes and ~last_error~ remains
+~None~, causing a panic.
+
+*Test first:*
+Write a test that calls ~fetch_domain_content~ (or the enclosing function)
+with ~max_retries = 0~.  Assert that it returns an ~Err~ rather than
+panicking.
+
+*Fix:*
+Replace the unwrap with a fallback error, e.g.:
+#+begin_src rust
+Err(last_error
+    .map(Into::into)
+    .unwrap_or_else(|| ClassifyError::NoRetries))
+#+end_src
+
+*** TODO [#C] Document metrics ~lazy_static~ unwraps as acceptable
+
+*File:* ~blocklist-server/src/metrics.rs~ (16 instances)
+
+The Prometheus ~register_*!~ macros in ~lazy_static!~ blocks use ~.unwrap()~.
+These only fail if a metric name is registered twice, which is a programmer
+error detected at process startup.  This is the idiomatic Rust-Prometheus
+pattern.
+
+*Action:*
+Add a module-level doc comment explaining why these unwraps are acceptable
+and cannot fail at runtime barring a code-level bug.
+
+** Test Coverage
+
+Critical code paths that currently lack tests.  Each task describes the gap and
+the tests to add.
+
+*** TODO [#A] Add HTTP endpoint integration tests for blocklist-server
+
+The blocklist-server has 10 HTTP handlers and zero HTTP-level tests.  All
+existing tests are database-only.
+
+*Endpoints to test:*
+- ~GET /blocklist~ — success, missing type param, bad date format
+- ~GET /health~ — returns 200 "OK"
+- ~GET /metrics~ — returns Prometheus text format
+- ~GET /classifications~ — JSON response, HTML response (Accept header)
+- ~GET /errors~ — JSON list of errored classifications
+- ~POST /expire~ — success, nonexistent domain
+- ~POST /requeue~ — success, domain not in error state, NATS unavailable
+- ~POST /requeue/type~ — success, no errors for type
+- ~POST /requeue/all~ — success, empty error list
+- ~POST /reprojection~ — success, custom TTL
+- ~POST /reconcile~ — success with domain and pattern entries
+- ~POST /classify~ — domain, pattern, neither, both
+
+*Approach:*
+Use ~axum::test~ (or ~tower::ServiceExt~) to construct the router with a
+real ~TestDb~ pool and a ~None~ NATS state.  No network sockets needed.
+
+*** TODO [#A] Add provisioned pattern rule tests
+
+The provisioned pattern feature (added 2026-03-16) has no tests for:
+- ~apply_pattern_classification~
+- ~reconcile_provisioned_patterns~
+- ~reconcile_all_provisioned~ (mixed domain + pattern entries)
+- ~apply_admin_pattern_classification~
+- ~ActiveProvisionedPattern::fetch_all_active~
+
+*Test first:*
+1. Insert a pattern rule, verify it appears in ~fetch_all_active~.
+2. Insert domains that match the pattern, call
+   ~apply_pattern_classification~, verify classifications are created and LLM
+   rows are expired.
+3. Call ~reconcile_provisioned_patterns~ with a set of patterns, verify
+   upsert/expire counts.
+4. Call ~reconcile_all_provisioned~ with mixed entries, verify routing.
+5. Call ~apply_admin_pattern_classification~, verify the rule is stored and
+   survives a reconcile run.
+
+*** TODO [#B] Add CLI command tests
+
+~cli/src/commands/domain.rs~ has no tests.  At minimum, test:
+- Argument parsing (mutually exclusive ~--domain~ / ~--pattern~).
+- ~reconcile~ subcommand reads a JSON file and calls the right DB functions.
+- ~classify~ subcommand with ~--ensure~ flag.
+
+*** TODO [#B] Add DNS NXDOMAIN classification tests
+
+~dns_nxdomain_classify~ in queue-processor is untested.  Write tests that:
+- Verify NXDOMAIN classification is stored correctly.
+- Verify it skips domains with existing current classifications.
+- Verify it creates the correct event type.
+
+** Documentation
+
+*** TODO [#C] Add doc comments to service crates
+
+The ~common~ crate has 128 doc comments; the service crates have far fewer:
+- ~log-processor~: 6
+- ~queue-processor~: 9
+- ~classifier~: 9
+- ~blocklist-server~: 1
+- ~cli~: 0
+
+Add ~///~ doc comments to all public functions and types in each crate.
+Focus on the "why" rather than restating the function signature.
+
+*** TODO [#D] Add admin API documentation to README
+
+The README documents ~/blocklist~, ~/health~, and ~/reconcile~ + ~/classify~
+but does not document the full admin API:
+- ~GET /classifications~ (JSON and HTML modes)
+- ~GET /errors~
+- ~POST /expire~
+- ~POST /requeue~, ~/requeue/type~, ~/requeue/all~
+- ~POST /reprojection~
+
+Add a subsection under "Admin HTTP API" for each.
+
+* Archived
 
 ** DONE Implement database password file security
 CLOSED: [2026-01-22 Wed]
@@ -80,24 +287,6 @@ CLOSED: [2026-01-22 Wed]
 - Added blocklist-server to flake overlays
 - Added blocklist-server app definition for nix run
 - Updated dev shell message to show blocklist-server
-
-
-** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - parallel node overlap
-
-One will notice some of the parallel nodes have an extra bar just sitting
-there.  Reducing the size of the label doesn't seem to help, as everything
-just gets bunched up more when the nodes are rebalanced.  We'll want to get
-a minimal example going.
-
-** TODO [#D] File a ticket for ~d2~ diagram rendering in ASCII - \n
-
-If you want to break up long labels, the generally accepted way to do
-things is via the ~\n~ character in ~d2~.  However in the ASCII renderer,
-this just prints a line break and the rendering engine is totally unaware
-of this.  This makes for broken rendering, and it's extra apparent when
-nodes are parallel.
-
-Make a minimal reproduction before filing.
 
 ** DONE [#C] Implement two Rust projects: A log-processor and a worker
 CLOSED: [2026-01-22 Thu 15:04]
@@ -180,3 +369,11 @@ General purpose platforms that could host gaming material but aren't
 dedicated to the purpose:
 1.  reddit.com
 2.  facebook.com
+
+** KILL [#D] File a ticket for ~d2~ diagram rendering in ASCII - parallel node overlap
+
+Superseded by switching to SVG rendering via org-babel.
+
+** KILL [#D] File a ticket for ~d2~ diagram rendering in ASCII - \n
+
+Superseded by switching to SVG rendering via org-babel.
