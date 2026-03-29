@@ -1,0 +1,22 @@
+initial_query: "DNS client sends query"
+dns_handle: "DNS server handles request"
+
+direction: down
+
+parallel_flows: {
+  grid-gap: 4
+  dns_to_upstream: "DNS server forwards to upstream"
+
+  dns_log: "DNS server logs request"
+  log_processor: "log processor enqueues domain"
+  queue_processor: "queue processor fetches & classifies"
+  database: "classification stored in database"
+  blocklist_server: "blocklist server serves via HTTP"
+  dns_reload: "DNS server fetches updated blocklist"
+
+  dns_log -> log_processor -> queue_processor -> database -> blocklist_server -> dns_reload
+}
+
+initial_query --> dns_handle
+dns_handle -> parallel_flows.dns_to_upstream
+dns_handle -> parallel_flows.dns_log

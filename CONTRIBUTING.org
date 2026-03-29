@@ -65,6 +65,47 @@ The ~classification_action~ PostgreSQL enum defines the set of valid actions:
 When adding new lifecycle transitions, prefer adding a new action value over
 encoding state in ~action_data~.
 
+#+name: event-sourcing
+#+begin_src d2 :file diagrams/event-sourcing.svg :exports results
+direction: right
+
+events: "domain_classification_events\n(append-only log)" {
+  shape: cylinder
+  style.fill: "#e8f4fd"
+}
+
+projection: "domain_classifications\n(projection)" {
+  shape: cylinder
+  style.fill: "#e8fde8"
+}
+
+reprojection: "/reprojection\n(admin endpoint)" {
+  shape: diamond
+  style.fill: "#fde8e8"
+}
+
+actions: {
+  queued: "queued"
+  classifying: "classifying"
+  classified: "classified"
+  error: "error"
+  expired: "expired"
+}
+
+actions.queued -> events: append
+actions.classifying -> events: append
+actions.classified -> events: append
+actions.error -> events: append
+actions.expired -> events: append
+
+events -> projection: "latest classified\nevent wins"
+reprojection -> projection: "rebuild from\nevents"
+reprojection -> events: "read all"
+#+end_src
+
+#+RESULTS: event-sourcing
+[[file:diagrams/event-sourcing.svg]]
+
 ** Projection vs. events
 
 - ~domain_classification_events~ is append-only and is the source of truth.
@@ -84,6 +125,37 @@ one of:
 | ~Expired~ | Classification exists but TTL has passed       | Re-classify         |
 | ~Error~   | Most recent type-specific event is ~error~     | Re-classify         |
 | ~Missing~ | No classification for this type yet            | Classify            |
+
+#+name: classifier-states
+#+begin_src d2 :file diagrams/classifier-states.svg :exports results
+direction: right
+
+Missing: "Missing\n(no classification)" {
+  style.fill: "#f0f0f0"
+}
+
+Current: "Current\n(within TTL)" {
+  style.fill: "#e8fde8"
+}
+
+Expired: "Expired\n(TTL passed)" {
+  style.fill: "#fde8e8"
+}
+
+Error: "Error\n(last event = error)" {
+  style.fill: "#fdf0e8"
+}
+
+Missing -> Current: classify
+Current -> Expired: "TTL expires"
+Expired -> Current: re-classify
+Error -> Current: re-classify
+Current -> Error: "classifier fails"
+Missing -> Error: "classifier fails"
+#+end_src
+
+#+RESULTS: classifier-states
+[[file:diagrams/classifier-states.svg]]
 
 * The ~common~ crate
 

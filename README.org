@@ -39,7 +39,8 @@ DNS Smart Block consists of three main components:
 
 So the DNS request and queue flow looks like this:
 
-#+begin_src d2 :results verbatim :exports results
+#+name: request-flow
+#+begin_src d2 :file diagrams/request-flow.svg :exports results
 initial_query: "DNS client sends query"
 dns_handle: "DNS server handles request"
 
@@ -64,61 +65,69 @@ dns_handle -> parallel_flows.dns_to_upstream
 dns_handle -> parallel_flows.dns_log
 #+end_src
 
-#+RESULTS:
-#+begin_example
-                        ┌───────────────────────┐
-                        │DNS client sends query │
-                        │                       │
-                        └───────────────────────┘
-                                  │
-                                  ▼
-                      ┌───────────────────────────┐
-                      │DNS server handles request │
-                      │                           │
-                      └───────────────────────────┘
-                              │       │
-                              │       └─────────┐
-                              │                 │
- ┌────────────────────────────│─────────────────│──────────────────┐
- │                         parallel_flows       │                  │
- │                            ▼                 ▼                  │
- │    ┌──────────────────────────────┌────────────────────────┐    │
- │    │DNS server forwards to upstrea│DNS server logs request │    │
- │    │                              │ │                      │    │
- │    └──────────────────────────────└────────────────────────┘    │
- │                                              │                  │
- │                                              ▼                  │
- │                                ┌──────────────────────────────┐ │
- │                                │log processor enqueues domain │ │
- │                                │                              │ │
- │                                └──────────────────────────────┘ │
- │                                              │                  │
- │                                              ▼                  │
- │                               ┌─────────────────────────────────────┐
- │                               │queue processor fetches & classifies │
- │                               │                                 │   │
- │                               └─────────────────────────────────────┘
- │                                              │                  │
- │                                              ▼                  │
- │                                ┌──────────────────────────────────┐
- │                                │classification stored in database │
- │                                │                                │ │
- │                                └──────────────────────────────────┘
- │                                              │                  │
- │                                              ▼                  │
- │                                ┌─────────────────────────────────┐
- │                                │blocklist server serves via HTTP││
- │                                │                                ││
- │                                └─────────────────────────────────┘
- │                                              │                  │
- │                                              ▼                  │
- │                              ┌─────────────────────────────────────┐
- │                              │DNS server fetches updated blocklist │
- │                              │                                  │  │
- │                              └─────────────────────────────────────┘
- │                                                                 │
- └─────────────────────────────────────────────────────────────────┘
-#+end_example
+#+RESULTS: request-flow
+[[file:diagrams/request-flow.svg]]
+
+And the service deployment topology:
+
+#+name: deployment
+#+begin_src d2 :file diagrams/deployment.svg :exports results
+direction: down
+
+dns_client: "DNS Client" {
+  shape: oval
+}
+
+dns_server: "DNS Server\n(Blocky / dnsmasq / etc.)" {
+  style.fill: "#e8f4fd"
+}
+
+log_processor: "log-processor" {
+  style.fill: "#fde8e8"
+}
+
+nats: "NATS\n(JetStream)" {
+  shape: queue
+  style.fill: "#f0f0f0"
+}
+
+queue_processor: "queue-processor" {
+  style.fill: "#fde8e8"
+}
+
+classifier: "classifier\n(subprocess)" {
+  style.fill: "#fdf0e8"
+}
+
+ollama: "Ollama\n(LLM)" {
+  shape: hexagon
+  style.fill: "#e8fde8"
+}
+
+postgres: "PostgreSQL" {
+  shape: cylinder
+  style.fill: "#f0e8fd"
+}
+
+blocklist_server: "blocklist-server" {
+  public: ":3000 (public)\n/blocklist /health /metrics"
+  admin: ":8080 (admin)\n/classifications /expire /requeue\n/reprojection /reconcile /classify"
+}
+
+dns_client -> dns_server: "query :53"
+dns_server -> log_processor: "log stream"
+log_processor -> nats: "publish domain"
+nats -> queue_processor: "consume"
+queue_processor -> classifier: "spawn"
+classifier -> ollama: "POST /api/generate"
+classifier -> queue_processor: "result"
+queue_processor -> postgres: "store"
+blocklist_server -> postgres: "query"
+dns_server -> blocklist_server.public: "fetch blocklist"
+#+end_src
+
+#+RESULTS: deployment
+[[file:diagrams/deployment.svg]]
 
 * Components
 

@@ -1,0 +1,34 @@
+direction: right
+
+events: "domain_classification_events\n(append-only log)" {
+  shape: cylinder
+  style.fill: "#e8f4fd"
+}
+
+projection: "domain_classifications\n(projection)" {
+  shape: cylinder
+  style.fill: "#e8fde8"
+}
+
+reprojection: "/reprojection\n(admin endpoint)" {
+  shape: diamond
+  style.fill: "#fde8e8"
+}
+
+actions: {
+  queued: "queued"
+  classifying: "classifying"
+  classified: "classified"
+  error: "error"
+  expired: "expired"
+}
+
+actions.queued -> events: append
+actions.classifying -> events: append
+actions.classified -> events: append
+actions.error -> events: append
+actions.expired -> events: append
+
+events -> projection: "latest classified\nevent wins"
+reprojection -> projection: "rebuild from\nevents"
+reprojection -> events: "read all"

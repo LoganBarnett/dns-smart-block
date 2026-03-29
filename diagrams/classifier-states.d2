@@ -1,0 +1,24 @@
+direction: right
+
+Missing: "Missing\n(no classification)" {
+  style.fill: "#f0f0f0"
+}
+
+Current: "Current\n(within TTL)" {
+  style.fill: "#e8fde8"
+}
+
+Expired: "Expired\n(TTL passed)" {
+  style.fill: "#fde8e8"
+}
+
+Error: "Error\n(last event = error)" {
+  style.fill: "#fdf0e8"
+}
+
+Missing -> Current: classify
+Current -> Expired: "TTL expires"
+Expired -> Current: re-classify
+Error -> Current: re-classify
+Current -> Error: "classifier fails"
+Missing -> Error: "classifier fails"

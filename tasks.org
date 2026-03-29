@@ -13,7 +13,8 @@ switching to SVG output via org-babel.  The ASCII renderer has known bugs with
 parallel node overlap and ~\n~ handling (see the archived d2 tickets below);
 SVG sidesteps both issues.
 
-*** TODO [#B] Replace ASCII flow diagram in README with d2 SVG
+*** DONE [#B] Replace ASCII flow diagram in README with d2 SVG
+CLOSED: [2026-03-28 Fri]
 :PROPERTIES:
 :EFFORT:   30min
 :END:
@@ -33,7 +34,8 @@ diagrams/request-flow.svg :exports results~ so Emacs generates the SVG via
    the SVG.
 6. Verify the SVG renders correctly.
 
-*** TODO [#B] Add event sourcing lifecycle diagram
+*** DONE [#B] Add event sourcing lifecycle diagram
+CLOSED: [2026-03-28 Fri]
 
 Add a named d2 diagram to CONTRIBUTING.org showing the event sourcing model:
 events table (append-only) to projection table, with the reprojection path.
@@ -44,7 +46,8 @@ events table (append-only) to projection table, with the reprojection path.
 - ~/reprojection~ admin endpoint arrow from events to projection
 - Event actions: queued, classifying, classified, error, expired
 
-*** TODO [#B] Add classification state machine diagram
+*** DONE [#B] Add classification state machine diagram
+CLOSED: [2026-03-28 Fri]
 
 Add a named d2 diagram to CONTRIBUTING.org illustrating the classifier state
 machine documented in the "Classifier state machine" section.
@@ -52,7 +55,8 @@ machine documented in the "Classifier state machine" section.
 *States:* Missing, Current, Expired, Error.
 *Transitions:* classify, TTL expires, error, re-classify.
 
-*** TODO [#C] Add service deployment diagram
+*** DONE [#C] Add service deployment diagram
+CLOSED: [2026-03-28 Fri]
 
 Add a named d2 diagram to README.org showing the deployed service topology:
 DNS server, log-processor, NATS, queue-processor, classifier (subprocess),
