@@ -3,6 +3,7 @@ use async_nats::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+/// NATS message payload for a domain to be classified.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DomainMessage {
   pub domain: String,
@@ -14,6 +15,7 @@ pub struct DomainMessage {
   pub resolved_ip: Option<String>,
 }
 
+/// Publishes domain messages to a NATS subject for downstream classification.
 pub struct QueuePublisher {
   client: Client,
   subject: String,

@@ -195,7 +195,8 @@ CLOSED: [2026-03-28 Fri]
 
 ** Documentation
 
-*** TODO [#C] Add doc comments to service crates
+*** DONE [#C] Add doc comments to service crates
+CLOSED: [2026-03-28 Fri]
 
 The ~common~ crate has 128 doc comments; the service crates have far fewer:
 - ~log-processor~: 6

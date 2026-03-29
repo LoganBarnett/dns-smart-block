@@ -6,6 +6,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 use tracing::{info, warn};
 
+/// Metadata extracted from an HTTP fetch of a domain's landing page.
+/// Passed to the LLM as structured input for classification.
 #[derive(Serialize, Debug)]
 pub struct SiteMetadata {
   pub domain: String,
@@ -43,6 +45,8 @@ impl SiteMetadata {
   }
 }
 
+/// Fetch a domain's landing page via HTTPS (falling back to HTTP), returning
+/// the response body truncated to `max_kb` and the HTTP status code.
 pub async fn fetch_domain(
   domain: &str,
   timeout_sec: u64,
@@ -154,6 +158,7 @@ pub async fn fetch_domain(
   )
 }
 
+/// Extract a trimmed attribute value from the first element matching a CSS selector.
 pub fn attr_from_css_selector(
   document: &Html,
   css_selector: &str,
@@ -167,6 +172,7 @@ pub fn attr_from_css_selector(
     .filter(|s| !s.is_empty())
 }
 
+/// Extract trimmed inner text from the first element matching a CSS selector.
 pub fn text_from_css_selector(
   document: &Html,
   css_selector: &str,
@@ -178,6 +184,8 @@ pub fn text_from_css_selector(
     .filter(|s| !s.is_empty())
 }
 
+/// Parse HTML and extract title, meta description, OpenGraph tags, and
+/// language attribute into a [`SiteMetadata`] struct for LLM classification.
 pub fn extract_metadata(
   domain: &str,
   html: &str,

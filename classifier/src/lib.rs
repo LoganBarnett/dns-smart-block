@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
 
+/// Request payload sent to the Ollama `/api/generate` endpoint.
 #[derive(Serialize, Debug, Clone)]
 pub struct OllamaRequest {
   pub model: String,
@@ -18,6 +19,7 @@ pub struct OllamaRequest {
   pub stream: bool,
 }
 
+/// Response from the Ollama `/api/generate` endpoint.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct OllamaResponse {
   pub response: String,
@@ -30,6 +32,8 @@ pub fn compute_prompt_hash(content: &str) -> String {
   format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+/// Send site metadata to an Ollama model and parse the structured
+/// classification response.
 pub async fn classify_with_llm(
   metadata: &SiteMetadata,
   ollama_url: &str,

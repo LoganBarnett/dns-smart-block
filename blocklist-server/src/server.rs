@@ -24,12 +24,14 @@ use std::collections::HashSet;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
+/// NATS connection state used to requeue errored domains for reclassification.
 #[derive(Clone)]
 pub struct NatsState {
   client: async_nats::Client,
   subject: String,
 }
 
+/// Shared application state injected into all HTTP handlers.
 #[derive(Clone)]
 pub struct AppState {
   pool: PgPool,
@@ -838,6 +840,8 @@ fn admin_router(state: AppState) -> Router {
 
 // ── server startup ────────────────────────────────────────────────────────────
 
+/// Start both the public (:3000) and admin (:8080) HTTP servers, connect
+/// to PostgreSQL and optionally NATS, and run the metrics refresh loop.
 pub async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
   info!("Starting DNS Smart Block Blocklist Server");
 

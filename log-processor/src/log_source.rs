@@ -6,6 +6,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, info};
 
+/// Where DNS log lines come from — either a file on disk or the stdout of
+/// an external command (e.g. `journalctl -f`).
 pub enum LogSource {
   File(PathBuf),
   Command(Vec<String>),

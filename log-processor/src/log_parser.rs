@@ -12,6 +12,8 @@ pub struct ParsedLine {
   pub resolved_ip: Option<String>,
 }
 
+/// Configurable regex-based parser that extracts domains (and optionally
+/// resolved IPs) from DNS server log lines.
 pub struct LogParser {
   domain_pattern: Regex,
   capture_group: usize,
@@ -21,6 +23,8 @@ pub struct LogParser {
 }
 
 impl LogParser {
+  /// Build a parser from regex patterns.  `line_filter` pre-screens lines
+  /// (e.g. only "RESOLVED"), `ip_pattern` optionally captures the answer IP.
   pub fn new(
     domain_pattern: &str,
     capture_group: usize,
