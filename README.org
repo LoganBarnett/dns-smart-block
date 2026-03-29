@@ -222,7 +222,93 @@ gaming-platform.org
 
 **** GET /health
 
-Health check endpoint.
+Health check endpoint.  Returns ~200 OK~.
+
+**** GET /metrics
+
+Prometheus metrics in text exposition format.  Includes domain counts,
+classification stats, request counters, and recent activity gauges.
+
+*** Admin HTTP API (port 8080)
+
+The admin API runs on a separate port (~--admin-bind-address~, default
+~0.0.0.0:8080~) and is not intended for public access.
+
+**** GET /classifications
+
+Returns all current (non-expired) classifications.
+
+- *JSON mode* (default, or ~Accept: application/json~): Returns a JSON array of
+  classification objects.
+- *HTML mode* (~Accept: text/html~): Returns the admin UI dashboard.
+
+**** GET /errors
+
+Returns a JSON array of domains whose most recent classification event was an
+error, along with error details.
+
+**** POST /expire
+
+Expire all active classifications for a domain.
+
+#+begin_src sh :exports code
+curl -X POST "http://localhost:8080/expire" \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "example.com"}'
+#+end_src
+
+**** POST /requeue
+
+Requeue a single errored domain for reclassification via NATS.
+
+#+begin_src sh :exports code
+curl -X POST "http://localhost:8080/requeue" \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "example.com"}'
+#+end_src
+
+**** POST /requeue/type
+
+Requeue all errored domains for a given classification type.
+
+#+begin_src sh :exports code
+curl -X POST "http://localhost:8080/requeue/type" \
+  -H "Content-Type: application/json" \
+  -d '{"classification_type": "gaming"}'
+#+end_src
+
+**** POST /requeue/all
+
+Requeue all errored domains across all classification types.
+
+#+begin_src sh :exports code
+curl -X POST "http://localhost:8080/requeue/all"
+#+end_src
+
+**** POST /reprojection
+
+Rebuild the ~domain_classifications~ projection from the event log.  Useful
+after manual database changes or schema migrations.
+
+#+begin_src sh :exports code
+# Default TTL from server config
+curl -X POST "http://localhost:8080/reprojection"
+
+# Custom TTL
+curl -X POST "http://localhost:8080/reprojection" \
+  -H "Content-Type: application/json" \
+  -d '{"ttl_days": 30}'
+#+end_src
+
+**** POST /classify
+
+Apply an admin classification for a domain or regex pattern.  See
+[[*Provisioned Classifications][Provisioned Classifications]] for details.
+
+**** POST /reconcile
+
+Reconcile the full set of provisioned classifications from a JSON array.  See
+[[*Provisioned Classifications][Provisioned Classifications]] for details.
 
 ** Classifier
 

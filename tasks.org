@@ -208,7 +208,8 @@ The ~common~ crate has 128 doc comments; the service crates have far fewer:
 Add ~///~ doc comments to all public functions and types in each crate.
 Focus on the "why" rather than restating the function signature.
 
-*** TODO [#D] Add admin API documentation to README
+*** DONE [#D] Add admin API documentation to README
+CLOSED: [2026-03-28 Fri]
 
 The README documents ~/blocklist~, ~/health~, and ~/reconcile~ + ~/classify~
 but does not document the full admin API:
