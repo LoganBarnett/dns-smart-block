@@ -2,8 +2,9 @@ use dns_smart_block_common::db::{
   ActiveProvisionedPattern, ClassificationSource, PromptInsert,
   ProvisionedEntry, apply_admin_classification,
   apply_admin_pattern_classification, apply_pattern_classification,
-  classification_store, fetch_all_override, reconcile_all_provisioned,
-  reconcile_provisioned_classifications, reconcile_provisioned_patterns,
+  classification_store, dns_nxdomain_classify, fetch_all_override,
+  reconcile_all_provisioned, reconcile_provisioned_classifications,
+  reconcile_provisioned_patterns,
 };
 use dns_smart_block_queue_processor::db::{
   exclude_rule_classify, insert_event,
@@ -1203,5 +1204,129 @@ async fn test_provisioned_pattern_source_deduplication() {
   assert_eq!(
     source_count, 1,
     "same (pattern, type) must produce exactly one source row"
+  );
+}
+
+// ── DNS NXDOMAIN classification tests ───────────────────────────────────
+
+/// `dns_nxdomain_classify` creates a not-matching classification with
+/// model "dns-nxdomain" and confidence 1.0.
+#[tokio::test]
+#[serial]
+async fn test_nxdomain_creates_classification() {
+  let (_db, pool) = setup_test_db().await;
+
+  dns_nxdomain_classify("nonexistent.example.com", "gaming", &pool, 30)
+    .await
+    .expect("dns_nxdomain_classify failed");
+
+  let row = sqlx::query(
+    "SELECT model, is_matching_site, confidence, source_id
+     FROM domain_classifications
+     WHERE domain = 'nonexistent.example.com' AND classification_type = 'gaming'",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("classification not found");
+
+  assert_eq!(row.try_get::<String, _>("model").unwrap(), "dns-nxdomain");
+  assert!(
+    !row.try_get::<bool, _>("is_matching_site").unwrap(),
+    "NXDOMAIN must set is_matching_site = false"
+  );
+  assert!(
+    (row.try_get::<f32, _>("confidence").unwrap() - 1.0).abs() < 0.01,
+    "NXDOMAIN must set confidence = 1.0"
+  );
+  assert!(
+    row
+      .try_get::<Option<i32>, _>("source_id")
+      .unwrap()
+      .is_some(),
+    "NXDOMAIN must have a source_id"
+  );
+}
+
+/// `dns_nxdomain_classify` creates a classified event with NXDOMAIN reasoning.
+#[tokio::test]
+#[serial]
+async fn test_nxdomain_creates_event() {
+  let (_db, pool) = setup_test_db().await;
+
+  dns_nxdomain_classify("gone.example.com", "gaming", &pool, 30)
+    .await
+    .unwrap();
+
+  let event_data: serde_json::Value = sqlx::query_scalar(
+    "SELECT action_data FROM domain_classification_events
+     WHERE domain = 'gone.example.com' AND action = 'classified'",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("event not found");
+
+  assert_eq!(event_data["model"], "dns-nxdomain");
+  assert_eq!(event_data["is_matching_site"], false);
+  assert_eq!(event_data["confidence"], 1.0);
+  assert!(
+    event_data["reasoning"]
+      .as_str()
+      .unwrap()
+      .contains("NXDOMAIN"),
+    "reasoning must mention NXDOMAIN"
+  );
+}
+
+/// `dns_nxdomain_classify` uses a dns_nxdomain source type.
+#[tokio::test]
+#[serial]
+async fn test_nxdomain_source_type() {
+  let (_db, pool) = setup_test_db().await;
+
+  dns_nxdomain_classify("nxsource.example.com", "gaming", &pool, 30)
+    .await
+    .unwrap();
+
+  let source_id: i32 = sqlx::query_scalar(
+    "SELECT source_id FROM domain_classifications
+     WHERE domain = 'nxsource.example.com'",
+  )
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+
+  let source_type: String = sqlx::query_scalar(
+    "SELECT source_type::text FROM classification_sources WHERE id = $1",
+  )
+  .bind(source_id)
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+
+  assert_eq!(source_type, "dns_nxdomain");
+}
+
+/// `dns_nxdomain_classify` respects the TTL parameter.
+#[tokio::test]
+#[serial]
+async fn test_nxdomain_ttl() {
+  let (_db, pool) = setup_test_db().await;
+
+  dns_nxdomain_classify("ttl-test.example.com", "gaming", &pool, 7)
+    .await
+    .unwrap();
+
+  let valid_until: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+    "SELECT valid_until FROM domain_classifications
+     WHERE domain = 'ttl-test.example.com'",
+  )
+  .fetch_one(&pool)
+  .await
+  .unwrap();
+
+  let days_out = (valid_until - chrono::Utc::now()).num_days();
+  assert!(
+    (5..=8).contains(&days_out),
+    "TTL of 7 days should produce valid_until ~7 days from now, got {days_out}"
   );
 }

@@ -146,31 +146,31 @@ async fn reconcile(
   }
 }
 
+/// Validate classify arguments: exactly one of domain/pattern required,
+/// and --ensure must be set.  Returns an error describing the problem.
+fn validate_classify_args(args: &ClassifyArgs) -> Result<(), CliError> {
+  if !args.ensure {
+    return Err(CliError::EnsureRequired);
+  }
+  match (&args.target.domain, &args.target.pattern) {
+    (None, None) => Err(CliError::Api {
+      status: 0,
+      body: "Either --domain or --pattern must be provided.".to_string(),
+    }),
+    (Some(_), Some(_)) => Err(CliError::Api {
+      status: 0,
+      body: "--domain and --pattern are mutually exclusive.".to_string(),
+    }),
+    _ => Ok(()),
+  }
+}
+
 async fn classify(
   args: ClassifyArgs,
   client: &reqwest::Client,
   admin_url: &str,
 ) -> Result<(), CliError> {
-  if !args.ensure {
-    return Err(CliError::EnsureRequired);
-  }
-
-  // Validate that exactly one of domain or pattern is provided.
-  match (&args.target.domain, &args.target.pattern) {
-    (None, None) => {
-      return Err(CliError::Api {
-        status: 0,
-        body: "Either --domain or --pattern must be provided.".to_string(),
-      });
-    }
-    (Some(_), Some(_)) => {
-      return Err(CliError::Api {
-        status: 0,
-        body: "--domain and --pattern are mutually exclusive.".to_string(),
-      });
-    }
-    _ => {}
-  }
+  validate_classify_args(&args)?;
 
   let url = format!("{}/classify", admin_url);
 
@@ -211,5 +211,138 @@ async fn classify(
       status: status.as_u16(),
       body,
     })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn make_args(
+    domain: Option<&str>,
+    pattern: Option<&str>,
+    ensure: bool,
+  ) -> ClassifyArgs {
+    ClassifyArgs {
+      target: ClassifyTarget {
+        domain: domain.map(String::from),
+        pattern: pattern.map(String::from),
+      },
+      classification_type: "gaming".to_string(),
+      is_matching_site: true,
+      confidence: 1.0,
+      reasoning: String::new(),
+      ttl_days: None,
+      ensure,
+    }
+  }
+
+  #[test]
+  fn test_validate_domain_only() {
+    let args = make_args(Some("example.com"), None, true);
+    assert!(validate_classify_args(&args).is_ok());
+  }
+
+  #[test]
+  fn test_validate_pattern_only() {
+    let args = make_args(None, Some(r"\.example\.com$"), true);
+    assert!(validate_classify_args(&args).is_ok());
+  }
+
+  #[test]
+  fn test_validate_neither_domain_nor_pattern() {
+    let args = make_args(None, None, true);
+    let err = validate_classify_args(&args).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+      msg.contains("Either --domain or --pattern"),
+      "unexpected error: {msg}"
+    );
+  }
+
+  #[test]
+  fn test_validate_both_domain_and_pattern() {
+    let args = make_args(Some("a.com"), Some(r"\.a\.com$"), true);
+    let err = validate_classify_args(&args).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+      msg.contains("mutually exclusive"),
+      "unexpected error: {msg}"
+    );
+  }
+
+  #[test]
+  fn test_validate_ensure_required() {
+    let args = make_args(Some("example.com"), None, false);
+    let err = validate_classify_args(&args).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("--ensure"), "unexpected error: {msg}");
+  }
+
+  #[test]
+  fn test_classify_request_serializes_domain_only() {
+    let req = ClassifyRequest {
+      domain: Some("example.com".to_string()),
+      pattern: None,
+      classification_type: "gaming".to_string(),
+      is_matching_site: true,
+      confidence: 0.95,
+      reasoning: "test".to_string(),
+      ttl_days: Some(30),
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("domain").is_some());
+    assert!(
+      json.get("pattern").is_none(),
+      "None pattern must be omitted"
+    );
+    assert_eq!(json["ttl_days"], 30);
+  }
+
+  #[test]
+  fn test_classify_request_serializes_pattern_only() {
+    let req = ClassifyRequest {
+      domain: None,
+      pattern: Some(r"\.example\.com$".to_string()),
+      classification_type: "gaming".to_string(),
+      is_matching_site: false,
+      confidence: 1.0,
+      reasoning: "".to_string(),
+      ttl_days: None,
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert!(json.get("domain").is_none(), "None domain must be omitted");
+    assert!(json.get("pattern").is_some());
+    assert!(
+      json.get("ttl_days").is_none(),
+      "None ttl_days must be omitted"
+    );
+  }
+
+  #[test]
+  fn test_reconcile_json_parsing() {
+    let json = r#"[
+      {
+        "domain": "example.com",
+        "classification_type": "gaming",
+        "is_matching_site": true,
+        "confidence": 0.95,
+        "reasoning": "Gaming site"
+      },
+      {
+        "pattern": "^(.*\\.)?gaming\\.com$",
+        "classification_type": "gaming",
+        "is_matching_site": true,
+        "confidence": 1.0
+      }
+    ]"#;
+
+    let entries: Vec<ProvisionedEntry> =
+      serde_json::from_str(json).expect("should parse");
+    assert_eq!(entries.len(), 2);
+    assert!(entries[0].domain.is_some());
+    assert!(entries[0].pattern.is_none());
+    assert!(entries[1].domain.is_none());
+    assert!(entries[1].pattern.is_some());
   }
 }

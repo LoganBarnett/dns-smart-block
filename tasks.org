@@ -63,7 +63,8 @@ PostgreSQL, blocklist-server (public + admin ports), Ollama.
 Rust production code must never panic.  Each task here identifies a call site
 that can panic at runtime and proposes a test-first fix.
 
-*** TODO [#A] Remove ~.expect()~ in queue-processor config lookup
+*** DONE [#A] Remove ~.expect()~ in queue-processor config lookup
+CLOSED: [2026-03-28 Fri]
 
 *File:* ~queue-processor/src/main.rs:334~
 #+begin_example
@@ -83,7 +84,8 @@ Assert that the function returns an error rather than panicking.
 Replace ~.expect()~ with ~.ok_or_else(|| ...)~ and propagate the error, or
 ~continue~ with a warning log if the intent is to skip unknown types.
 
-*** TODO [#A] Remove ~.unwrap()~ on ~last_error~ in classifier retry path
+*** DONE [#A] Remove ~.unwrap()~ on ~last_error~ in classifier retry path
+CLOSED: [2026-03-28 Fri]
 
 *File:* ~classifier/src/web_classify.rs:150~
 #+begin_example
@@ -107,7 +109,8 @@ Err(last_error
     .unwrap_or_else(|| ClassifyError::NoRetries))
 #+end_src
 
-*** TODO [#C] Document metrics ~lazy_static~ unwraps as acceptable
+*** DONE [#C] Document metrics ~lazy_static~ unwraps as acceptable
+CLOSED: [2026-03-28 Fri]
 
 *File:* ~blocklist-server/src/metrics.rs~ (16 instances)
 
@@ -125,7 +128,8 @@ and cannot fail at runtime barring a code-level bug.
 Critical code paths that currently lack tests.  Each task describes the gap and
 the tests to add.
 
-*** TODO [#A] Add HTTP endpoint integration tests for blocklist-server
+*** DONE [#A] Add HTTP endpoint integration tests for blocklist-server
+CLOSED: [2026-03-28 Fri]
 
 The blocklist-server has 10 HTTP handlers and zero HTTP-level tests.  All
 existing tests are database-only.
@@ -148,7 +152,8 @@ existing tests are database-only.
 Use ~axum::test~ (or ~tower::ServiceExt~) to construct the router with a
 real ~TestDb~ pool and a ~None~ NATS state.  No network sockets needed.
 
-*** TODO [#A] Add provisioned pattern rule tests
+*** DONE [#A] Add provisioned pattern rule tests
+CLOSED: [2026-03-28 Fri]
 
 The provisioned pattern feature (added 2026-03-16) has no tests for:
 - ~apply_pattern_classification~
@@ -168,14 +173,16 @@ The provisioned pattern feature (added 2026-03-16) has no tests for:
 5. Call ~apply_admin_pattern_classification~, verify the rule is stored and
    survives a reconcile run.
 
-*** TODO [#B] Add CLI command tests
+*** DONE [#B] Add CLI command tests
+CLOSED: [2026-03-28 Fri]
 
 ~cli/src/commands/domain.rs~ has no tests.  At minimum, test:
 - Argument parsing (mutually exclusive ~--domain~ / ~--pattern~).
 - ~reconcile~ subcommand reads a JSON file and calls the right DB functions.
 - ~classify~ subcommand with ~--ensure~ flag.
 
-*** TODO [#B] Add DNS NXDOMAIN classification tests
+*** DONE [#B] Add DNS NXDOMAIN classification tests
+CLOSED: [2026-03-28 Fri]
 
 ~dns_nxdomain_classify~ in queue-processor is untested.  Write tests that:
 - Verify NXDOMAIN classification is stored correctly.
