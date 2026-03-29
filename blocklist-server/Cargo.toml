@@ -25,6 +25,6 @@ async-nats = "0.33"
 serde_json = "*"
 
 [dev-dependencies]
-axum-test = "*"
+axum-test = "16"
 serial_test = { workspace = true }
 cargo-husky = { version = "1", features = ["user-hooks"] }

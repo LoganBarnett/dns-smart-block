@@ -25,6 +25,10 @@ mod tests {
       .execute(&pool)
       .await
       .expect("Failed to clean domains");
+    sqlx::query("DELETE FROM provisioned_pattern_rules")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean provisioned_pattern_rules");
     sqlx::query("DELETE FROM classification_sources")
       .execute(&pool)
       .await
@@ -268,6 +272,10 @@ mod tests {
       .execute(&pool)
       .await
       .expect("Failed to clean domains");
+    sqlx::query("DELETE FROM provisioned_pattern_rules")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean provisioned_pattern_rules");
     sqlx::query("DELETE FROM classification_sources")
       .execute(&pool)
       .await

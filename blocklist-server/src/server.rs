@@ -957,3 +957,602 @@ pub async fn run(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
 
   Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use axum_test::TestServer;
+  use chrono::Duration;
+  use serial_test::serial;
+  use sqlx::PgPool;
+
+  async fn setup_test_db() -> (dns_smart_block_common::test_db::TestDb, PgPool)
+  {
+    let test_db = dns_smart_block_common::test_db::TestDb::new()
+      .expect("failed to start test db");
+    let pool = test_db.pool().await.expect("failed to get pool");
+
+    sqlx::query("DELETE FROM domain_classification_events")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean events");
+    sqlx::query("DELETE FROM domain_classifications")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean classifications");
+    sqlx::query("DELETE FROM domains")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean domains");
+    sqlx::query("DELETE FROM provisioned_pattern_rules")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean provisioned_pattern_rules");
+    sqlx::query("DELETE FROM classification_sources")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean classification_sources");
+    sqlx::query("DELETE FROM prompts")
+      .execute(&pool)
+      .await
+      .expect("Failed to clean prompts");
+
+    (test_db, pool)
+  }
+
+  /// Insert a prompt and its classification_source, returning source_id.
+  async fn ensure_test_source(pool: &PgPool, content: &str, hash: &str) -> i32 {
+    sqlx::query(
+      "INSERT INTO prompts (content, hash, created_at) \
+       VALUES ($1, $2, NOW()) ON CONFLICT (hash) DO NOTHING",
+    )
+    .bind(content)
+    .bind(hash)
+    .execute(pool)
+    .await
+    .expect("insert prompt");
+
+    let prompt_id: i32 =
+      sqlx::query_scalar("SELECT id FROM prompts WHERE hash = $1")
+        .bind(hash)
+        .fetch_one(pool)
+        .await
+        .expect("fetch prompt id");
+
+    sqlx::query(
+      "INSERT INTO classification_sources (source_type, prompt_id, created_at) \
+       VALUES ('llm_prompt', $1, NOW()) \
+       ON CONFLICT (prompt_id) WHERE prompt_id IS NOT NULL DO NOTHING",
+    )
+    .bind(prompt_id)
+    .execute(pool)
+    .await
+    .expect("insert classification source");
+
+    sqlx::query_scalar(
+      "SELECT id FROM classification_sources \
+       WHERE prompt_id = $1 AND source_type = 'llm_prompt'",
+    )
+    .bind(prompt_id)
+    .fetch_one(pool)
+    .await
+    .expect("fetch source id")
+  }
+
+  /// Insert a domain with a valid classification.
+  async fn insert_classified_domain(
+    pool: &PgPool,
+    domain: &str,
+    classification_type: &str,
+    is_matching: bool,
+    source_id: i32,
+  ) {
+    sqlx::query(
+      "INSERT INTO domains (domain, last_updated) VALUES ($1, NOW()) \
+       ON CONFLICT (domain) DO NOTHING",
+    )
+    .bind(domain)
+    .execute(pool)
+    .await
+    .expect("insert domain");
+
+    let now = Utc::now();
+    sqlx::query(
+      "INSERT INTO domain_classifications \
+       (domain, classification_type, is_matching_site, confidence, \
+        valid_on, valid_until, model, source_id, created_at) \
+       VALUES ($1, $2, $3, 0.95, $4, $5, 'test-model', $6, NOW())",
+    )
+    .bind(domain)
+    .bind(classification_type)
+    .bind(is_matching)
+    .bind(now)
+    .bind(now + Duration::days(10))
+    .bind(source_id)
+    .execute(pool)
+    .await
+    .expect("insert classification");
+  }
+
+  fn test_state(pool: PgPool) -> AppState {
+    AppState { pool, nats: None }
+  }
+
+  fn make_public_server(pool: PgPool) -> TestServer {
+    TestServer::new(public_router(test_state(pool)).into_make_service())
+      .expect("failed to create test server")
+  }
+
+  fn make_admin_server(pool: PgPool) -> TestServer {
+    TestServer::new(admin_router(test_state(pool)).into_make_service())
+      .expect("failed to create test server")
+  }
+
+  // ── public: GET /health ──────────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_health_returns_ok() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_public_server(pool);
+
+    let response = server.get("/health").await;
+    response.assert_status_ok();
+    response.assert_text("OK");
+  }
+
+  // ── public: GET /blocklist ───────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_blocklist_returns_matching_domains() {
+    let (_db, pool) = setup_test_db().await;
+    let source_id =
+      ensure_test_source(&pool, "test prompt", "sha256:http-test").await;
+
+    insert_classified_domain(&pool, "game1.com", "gaming", true, source_id)
+      .await;
+    insert_classified_domain(&pool, "game2.com", "gaming", true, source_id)
+      .await;
+    // Negative classification: should NOT appear in blocklist.
+    insert_classified_domain(&pool, "safe.com", "gaming", false, source_id)
+      .await;
+
+    let server = make_public_server(pool);
+    let response = server
+      .get("/blocklist")
+      .add_query_param("type", "gaming")
+      .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(body.contains("game1.com"), "should contain game1.com");
+    assert!(body.contains("game2.com"), "should contain game2.com");
+    assert!(!body.contains("safe.com"), "should not contain safe.com");
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_blocklist_missing_type_param() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_public_server(pool);
+
+    let response = server.get("/blocklist").await;
+    response.assert_status(StatusCode::BAD_REQUEST);
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_blocklist_bad_date_format() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_public_server(pool);
+
+    let response = server
+      .get("/blocklist")
+      .add_query_param("type", "gaming")
+      .add_query_param("at", "not-a-date")
+      .await;
+
+    response.assert_status(StatusCode::BAD_REQUEST);
+    let body = response.text();
+    assert!(
+      body.contains("Invalid time format"),
+      "should mention invalid time format"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_blocklist_with_at_time() {
+    let (_db, pool) = setup_test_db().await;
+    let source_id =
+      ensure_test_source(&pool, "test prompt", "sha256:http-at").await;
+
+    // Insert a classification that starts in the future.
+    sqlx::query(
+      "INSERT INTO domains (domain, last_updated) \
+       VALUES ('future.com', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert domain");
+
+    let now = Utc::now();
+    let future_start = now + Duration::days(2);
+    let future_end = now + Duration::days(12);
+
+    sqlx::query(
+      "INSERT INTO domain_classifications \
+       (domain, classification_type, is_matching_site, confidence, \
+        valid_on, valid_until, model, source_id, created_at) \
+       VALUES ($1, 'gaming', true, 0.95, $2, $3, 'test', $4, NOW())",
+    )
+    .bind("future.com")
+    .bind(future_start)
+    .bind(future_end)
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .expect("insert classification");
+
+    let server = make_public_server(pool);
+
+    // Not visible now.
+    let response = server
+      .get("/blocklist")
+      .add_query_param("type", "gaming")
+      .await;
+    response.assert_status_ok();
+    assert!(
+      !response.text().contains("future.com"),
+      "should not appear at current time"
+    );
+
+    // Visible at the future time.
+    let at = (future_start + Duration::hours(1)).to_rfc3339();
+    let response = server
+      .get("/blocklist")
+      .add_query_param("type", "gaming")
+      .add_query_param("at", &at)
+      .await;
+    response.assert_status_ok();
+    assert!(
+      response.text().contains("future.com"),
+      "should appear at future time"
+    );
+  }
+
+  // ── public: GET /metrics ─────────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_metrics_returns_prometheus_format() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_public_server(pool);
+
+    let response = server.get("/metrics").await;
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+      body.contains("dns_smart_block_"),
+      "should contain dns_smart_block_ metrics"
+    );
+  }
+
+  // ── admin: GET /classifications ──────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_classifications_json() {
+    let (_db, pool) = setup_test_db().await;
+    let source_id =
+      ensure_test_source(&pool, "prompt", "sha256:cls-json").await;
+    insert_classified_domain(&pool, "test.com", "gaming", true, source_id)
+      .await;
+
+    let server = make_admin_server(pool);
+    let response = server
+      .get("/classifications")
+      .add_header(
+        axum::http::header::ACCEPT,
+        axum::http::HeaderValue::from_static("application/json"),
+      )
+      .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(body.contains("test.com"), "JSON should contain domain");
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_classifications_html() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .get("/classifications")
+      .add_header(
+        axum::http::header::ACCEPT,
+        axum::http::HeaderValue::from_static("text/html"),
+      )
+      .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+      body.contains("<!DOCTYPE html>") || body.contains("<html"),
+      "should return HTML template"
+    );
+  }
+
+  // ── admin: GET /errors ───────────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_errors_empty() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server.get("/errors").await;
+    response.assert_status_ok();
+    let body = response.text();
+    assert_eq!(body, "[]", "should return empty JSON array");
+  }
+
+  // ── admin: POST /expire ──────────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_expire_domain() {
+    let (_db, pool) = setup_test_db().await;
+    let source_id =
+      ensure_test_source(&pool, "prompt", "sha256:expire-test").await;
+    insert_classified_domain(&pool, "to-expire.com", "gaming", true, source_id)
+      .await;
+
+    let server = make_admin_server(pool.clone());
+
+    let response = server
+      .post("/expire")
+      .add_query_param("domain", "to-expire.com")
+      .await;
+    response.assert_status_ok();
+
+    // Verify the domain no longer appears in blocklist.
+    let domains = db::get_blocked_domains(&pool, "gaming", None)
+      .await
+      .unwrap();
+    assert!(
+      !domains.contains(&"to-expire.com".to_string()),
+      "expired domain should not appear in blocklist"
+    );
+  }
+
+  // ── admin: POST /reprojection ────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_reprojection() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server.post("/reprojection").await;
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+      body.contains("Reprojection completed"),
+      "should report completion"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_reprojection_custom_ttl() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .post("/reprojection")
+      .add_query_param("ttl_days", "30")
+      .await;
+    response.assert_status_ok();
+  }
+
+  // ── admin: POST /requeue (NATS disabled) ─────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_requeue_without_nats() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .post("/requeue")
+      .add_query_param("domain", "example.com")
+      .add_query_param("classification_type", "gaming")
+      .await;
+    response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_requeue_type_without_nats() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .post("/requeue/type")
+      .add_query_param("classification_type", "gaming")
+      .await;
+    response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_requeue_all_without_nats() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server.post("/requeue/all").await;
+    response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+  }
+
+  // ── admin: POST /classify ────────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_classify_domain() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool.clone());
+
+    let response = server
+      .post("/classify")
+      .json(&serde_json::json!({
+        "domain": "admin-blocked.com",
+        "classification_type": "gaming",
+        "is_matching_site": true,
+        "confidence": 1.0,
+        "reasoning": "Admin override"
+      }))
+      .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+      body.contains("Classification applied"),
+      "should confirm classification"
+    );
+
+    // Verify it shows up in blocklist.
+    let domains = db::get_blocked_domains(&pool, "gaming", None)
+      .await
+      .unwrap();
+    assert!(domains.contains(&"admin-blocked.com".to_string()));
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_classify_pattern() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .post("/classify")
+      .json(&serde_json::json!({
+        "pattern": "^(.*\\.)?example\\.com$",
+        "classification_type": "gaming",
+        "is_matching_site": false,
+        "confidence": 1.0,
+        "reasoning": "Allowed pattern"
+      }))
+      .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+      body.contains("Pattern classification applied"),
+      "should confirm pattern classification"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_classify_neither_domain_nor_pattern() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .post("/classify")
+      .json(&serde_json::json!({
+        "classification_type": "gaming",
+        "is_matching_site": true,
+        "confidence": 1.0
+      }))
+      .await;
+
+    response.assert_status(StatusCode::BAD_REQUEST);
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_classify_both_domain_and_pattern() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .post("/classify")
+      .json(&serde_json::json!({
+        "domain": "example.com",
+        "pattern": "^example\\.com$",
+        "classification_type": "gaming",
+        "is_matching_site": true,
+        "confidence": 1.0
+      }))
+      .await;
+
+    response.assert_status(StatusCode::BAD_REQUEST);
+  }
+
+  // ── admin: POST /reconcile ───────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_reconcile_provisioned() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server
+      .post("/reconcile")
+      .json(&serde_json::json!([
+        {
+          "domain": "blocked.com",
+          "classification_type": "gaming",
+          "is_matching_site": true,
+          "confidence": 1.0,
+          "reasoning": "Provisioned block"
+        }
+      ]))
+      .await;
+
+    response.assert_status_ok();
+    let body = response.text();
+    assert!(
+      body.contains("Reconcile complete"),
+      "should report completion"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_reconcile_empty_list() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server.post("/reconcile").json(&serde_json::json!([])).await;
+
+    response.assert_status_ok();
+  }
+
+  // ── admin: static assets ─────────────────────────────────────────────
+
+  #[tokio::test]
+  #[serial]
+  async fn test_static_css() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server.get("/static/classifications.css").await;
+    response.assert_status_ok();
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_static_elm_js() {
+    let (_db, pool) = setup_test_db().await;
+    let server = make_admin_server(pool);
+
+    let response = server.get("/static/elm.js").await;
+    response.assert_status_ok();
+  }
+}
