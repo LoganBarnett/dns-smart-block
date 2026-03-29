@@ -1,3 +1,12 @@
+//! Prometheus metrics for the blocklist server.
+//!
+//! The `register_*!` macros inside `lazy_static!` use `.unwrap()`.  This is the
+//! idiomatic Rust-Prometheus pattern: registration only fails when a metric with
+//! the same name has already been registered in the global default registry,
+//! which is a compile-time programmer error (duplicate constant names).  Because
+//! each metric name is unique and defined once, these unwraps cannot fail at
+//! runtime.
+
 use crate::db::MetricsStats;
 use lazy_static::lazy_static;
 use prometheus::{

@@ -327,11 +327,23 @@ async fn process_domain(
 
   // Process each classifier based on its state.
   for (classification_type, state) in states {
-    let classifier_config = config
+    let classifier_config = match config
       .classifiers
       .iter()
       .find(|c| c.name == classification_type)
-      .expect("Classifier config should exist for all classification types");
+    {
+      Some(cfg) => cfg,
+      None => {
+        // classification_types is derived from config.classifiers (line 242),
+        // so this branch should be unreachable.  Guard defensively rather than
+        // panicking in case a future refactor breaks the invariant.
+        warn!(
+          "No classifier config found for type '{}', skipping",
+          classification_type
+        );
+        continue;
+      }
+    };
 
     match state {
       ClassifierState::Current => {

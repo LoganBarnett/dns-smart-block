@@ -60,6 +60,9 @@ pub enum ClassifierError {
 
   #[error("JSON serialization error: {0}")]
   JsonError(#[from] serde_json::Error),
+
+  #[error("Domain fetch retries exhausted with no attempts made")]
+  DomainFetchRetriesExhausted,
 }
 
 impl ClassifierError {
@@ -82,6 +85,9 @@ impl ClassifierError {
       }
       ClassifierError::JsonError(_) => {
         ClassifierErrorType::MetadataSerializationError
+      }
+      ClassifierError::DomainFetchRetriesExhausted => {
+        ClassifierErrorType::DomainFetchError
       }
     }
   }

@@ -146,8 +146,12 @@ pub async fn fetch_domain(
     }
   }
 
-  // All retries exhausted, return the last error
-  Err(last_error.unwrap().into())
+  // All retries exhausted, return the last error.
+  Err(
+    last_error
+      .map(ClassifierError::from)
+      .unwrap_or(ClassifierError::DomainFetchRetriesExhausted),
+  )
 }
 
 pub fn attr_from_css_selector(
