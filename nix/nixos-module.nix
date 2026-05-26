@@ -206,6 +206,51 @@ in {
           address (1-indexed).
         '';
       };
+
+      package = mkOption {
+        type = types.package;
+        default = pkgs.dns-smart-block-log-processor;
+        description = ''
+          The log-processor package to use.  Defaults to the bundled
+          flake-built derivation.  Hosts that need a custom build can
+          replace this; the option's <literal>apply</literal> transform
+          composes the <option>profiling.enable</option> flag onto whatever
+          is set here by calling <literal>.override { enableProfiling = true; }</literal>
+          on it, so any <literal>callPackage</literal>-built derivation
+          that accepts <literal>enableProfiling</literal> as an argument
+          (the bundled package does) works without further wiring.
+        '';
+        apply = pkg:
+          if config.services.dns-smart-block.logProcessor.profiling.enable
+          then pkg.override { enableProfiling = true; }
+          else pkg;
+      };
+
+      profiling = {
+        enable = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Build the log-processor with the <literal>dhat</literal> heap
+            profiler enabled.  The instrumented binary writes a
+            <literal>dhat-heap.json</literal> to the service's working
+            directory on graceful shutdown (SIGTERM via <literal>systemctl
+            stop</literal> or SIGINT); inspect it with the vendored
+            <literal>dh_view</literal> derivation.
+
+            When enabled, the systemd unit additionally gets a
+            <literal>StateDirectory</literal> of
+            <literal>dns-smart-block-log-processor-profiling</literal> and
+            <literal>WorkingDirectory</literal> pointed at
+            <literal>/var/lib/dns-smart-block-log-processor-profiling</literal>
+            so the profile JSON has a writable, predictable landing spot
+            under <literal>ProtectSystem=strict</literal>.
+
+            See <literal>tasks.org</literal> "Memory leak" for the
+            diagnostic flow this is intended to support.
+          '';
+        };
+      };
     };
 
     # Queue Processor Global Defaults
@@ -458,7 +503,10 @@ in {
     # Package references (internal, not meant for user configuration)
     packages = {
       classifier = pkgs.dns-smart-block-classifier;
-      log-processor = pkgs.dns-smart-block-log-processor;
+      # Read through the option so any host override + the profiling
+      # `apply` transform both compose into the binary the systemd unit
+      # actually launches.
+      log-processor = cfg.logProcessor.package;
       queue-processor = pkgs.dns-smart-block-queue-processor;
       blocklist-server = pkgs.dns-smart-block-blocklist-server;
       cli = pkgs.dns-smart-block-cli;
@@ -562,8 +610,15 @@ in {
     );
 
   in {
-    # Install packages.
-    environment.systemPackages = builtins.attrValues packages ++ [ pkgs.natscli ];
+    # Install packages.  When profiling is enabled, also expose the
+    # vendored `dh_view` heap-profile viewer system-wide so an operator
+    # on the host (or anyone with the profile JSON in hand) has the
+    # matching tool immediately available.
+    environment.systemPackages =
+      builtins.attrValues packages
+      ++ [ pkgs.natscli ]
+      ++ lib.optional cfg.logProcessor.profiling.enable
+        pkgs.dns-smart-block-dh-view;
 
     # Create service user and group for PostgreSQL peer authentication.
     users.users.${serviceUser} = {
@@ -720,6 +775,16 @@ in {
             (!(lib.hasPrefix "cmd:" cfg.logProcessor.logSource))
             cfg.logProcessor.logSource
           ;
+        }
+        # When dhat profiling is enabled the binary writes
+        # `dhat-heap.json` to its cwd on graceful shutdown.  Pin the cwd
+        # to a systemd-managed StateDirectory so the path exists, is
+        # writable under `ProtectSystem=strict`, and survives across
+        # service restarts for retrieval.
+        // lib.optionalAttrs cfg.logProcessor.profiling.enable {
+          StateDirectory = "dns-smart-block-log-processor-profiling";
+          WorkingDirectory =
+            "/var/lib/dns-smart-block-log-processor-profiling";
         };
 
         environment = {

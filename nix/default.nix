@@ -90,18 +90,26 @@ let
     };
   });
 
-  log-processor = craneLib.buildPackage (commonArgs // {
-    pname = "dns-smart-block-log-processor";
-    version = "0.1.0";
-    cargoExtraArgs = "--package dns-smart-block-log-processor";
+  # Wrapped in `lib.makeOverridable` so downstream consumers (notably the
+  # NixOS module's `apply` transform on `services.dns-smart-block.logProcessor.package`)
+  # can call `.override { enableProfiling = true; }` to swap in a build with
+  # the dhat heap profiler wired up.  See tasks.org "Memory leak" for the
+  # diagnostic flow this enables.
+  log-processor = lib.makeOverridable (
+    { enableProfiling ? false }: craneLib.buildPackage (commonArgs // {
+      pname = "dns-smart-block-log-processor";
+      version = "0.1.0";
+      cargoExtraArgs = "--package dns-smart-block-log-processor"
+        + lib.optionalString enableProfiling " --features profiling";
 
-    meta = {
-      description = "DNS Smart Block Log Processor - Watches DNS logs and queues domains";
-      homepage = "https://github.com/yourusername/dns-smart-block";
-      license = lib.licenses.mit;
-      maintainers = [ ];
-    };
-  });
+      meta = {
+        description = "DNS Smart Block Log Processor - Watches DNS logs and queues domains";
+        homepage = "https://github.com/yourusername/dns-smart-block";
+        license = lib.licenses.mit;
+        maintainers = [ ];
+      };
+    })
+  ) {};
 
   queue-processor = craneLib.buildPackage (commonArgs // {
     pname = "dns-smart-block-queue-processor";
@@ -142,6 +150,10 @@ let
     };
   });
 
+  # Vendored dhat heap-profile viewer.  Not part of the `all` rollup
+  # because it's only useful on hosts that have enabled profiling.
+  dh-view = pkgs.callPackage ./dh-view.nix {};
+
   # Combine all packages
   all = pkgs.symlinkJoin {
     name = "dns-smart-block-all";
@@ -155,5 +167,5 @@ let
   };
 in
 {
-  inherit classifier log-processor queue-processor blocklist-server cli all;
+  inherit classifier log-processor queue-processor blocklist-server cli dh-view all;
 }

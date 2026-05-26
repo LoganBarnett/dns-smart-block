@@ -27,6 +27,14 @@ notify = "6"
 chrono = "*"
 base64ct = { workspace = true }
 url = "*"
+# Heap profiler.  Active only when the `profiling` feature is enabled —
+# instrumented builds swap the global allocator to `dhat::Alloc` and dump
+# a dhat-heap.json on graceful shutdown.  See tasks.org "Memory leak" for
+# the diagnostic flow.
+dhat = { version = "0.3", optional = true }
+
+[features]
+profiling = ["dep:dhat"]
 
 [dev-dependencies]
 wiremock = "0.5"

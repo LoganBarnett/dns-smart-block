@@ -6,8 +6,22 @@ use dns_smart_block_log_processor::{
 use futures::StreamExt;
 use tracing::{error, info};
 
+// Heap profiler instrumentation.  Active only when the `profiling` feature
+// is enabled; otherwise the system allocator and a no-op `_profiler` local
+// stand in.  See tasks.org "Memory leak" for the diagnostic flow.
+#[cfg(feature = "profiling")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[tokio::main]
 async fn main() -> Result<()> {
+  // Profiler must be created at the very top of main so its `Drop` (which
+  // writes `dhat-heap.json` to the cwd) runs when `main` returns through
+  // the normal scope-end path.  The graceful shutdown handler below
+  // converts SIGTERM/SIGINT into a clean return so this lands.
+  #[cfg(feature = "profiling")]
+  let _profiler = dhat::Profiler::new_heap();
+
   let args = CliArgs::parse();
 
   // Initialize logging with auto-detection and CLI overrides
@@ -54,34 +68,53 @@ async fn main() -> Result<()> {
   dns_smart_block_common::systemd::notify_ready();
   dns_smart_block_common::systemd::spawn_watchdog();
 
-  while let Some(line_result) = stream.next().await {
-    match line_result {
-      Ok(line) => {
-        if let Some(parsed) = parser.parse_log_line(&line) {
-          info!("Found domain in log: {}", parsed.domain);
+  // Install a SIGTERM handler before entering the stream loop so systemd's
+  // `systemctl stop` triggers a clean shutdown via the select! below.
+  // Without this, the default SIGTERM disposition kills the process and any
+  // stack-allocated Drop impls (including the dhat Profiler in profiling
+  // builds) never run.
+  let mut sigterm =
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-          match queue
-            .publish_domain(&parsed.domain, parsed.resolved_ip)
-            .await
-          {
-            Ok(()) => {
-              info!("Queued domain: {}", parsed.domain);
+  tokio::select! {
+    _ = async {
+      while let Some(line_result) = stream.next().await {
+        match line_result {
+          Ok(line) => {
+            if let Some(parsed) = parser.parse_log_line(&line) {
+              info!("Found domain in log: {}", parsed.domain);
+
+              match queue
+                .publish_domain(&parsed.domain, parsed.resolved_ip)
+                .await
+              {
+                Ok(()) => {
+                  info!("Queued domain: {}", parsed.domain);
+                }
+                Err(e) => {
+                  error!(
+                    "Failed to publish domain {} to queue: {}",
+                    parsed.domain, e
+                  );
+                }
+              }
             }
-            Err(e) => {
-              error!(
-                "Failed to publish domain {} to queue: {}",
-                parsed.domain, e
-              );
-            }
+          }
+          Err(e) => {
+            error!("Error reading log line: {}", e);
           }
         }
       }
-      Err(e) => {
-        error!("Error reading log line: {}", e);
-      }
+      info!("Log stream ended");
+    } => {}
+    _ = tokio::signal::ctrl_c() => {
+      info!("SIGINT received, shutting down");
+    }
+    _ = sigterm.recv() => {
+      info!("SIGTERM received, shutting down");
     }
   }
 
-  info!("Log stream ended");
+  info!("Log processor exiting");
   Ok(())
 }

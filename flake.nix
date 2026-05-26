@@ -70,6 +70,7 @@
       queue-processor = dnsSmartBlock.queue-processor;
       blocklist-server = dnsSmartBlock.blocklist-server;
       cli = dnsSmartBlock.cli;
+      dh-view = dnsSmartBlock.dh-view;
 
       # Default to building all
       default = dnsSmartBlock.all;
@@ -81,6 +82,7 @@
       dns-smart-block-queue-processor = self.packages.${final.stdenv.hostPlatform.system}.queue-processor;
       dns-smart-block-blocklist-server = self.packages.${final.stdenv.hostPlatform.system}.blocklist-server;
       dns-smart-block-cli = self.packages.${final.stdenv.hostPlatform.system}.cli;
+      dns-smart-block-dh-view = self.packages.${final.stdenv.hostPlatform.system}.dh-view;
     };
 
     # Apps for easy running
