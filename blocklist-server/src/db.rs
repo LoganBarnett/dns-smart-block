@@ -570,6 +570,141 @@ mod tests {
     assert!(stats.events_by_action.is_empty());
   }
 
+  // ── recent_classified_by_type tests ───────────────────────────────────────
+
+  // Helper to insert a "classified" event with a classification_type in
+  // action_data at a specific timestamp offset from NOW().
+  async fn insert_classified_event_at(
+    pool: &PgPool,
+    domain: &str,
+    classification_type: &str,
+    seconds_ago: i64,
+  ) {
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classification_events
+        (domain, action, action_data, created_at)
+      VALUES (
+        $1,
+        'classified'::classification_action,
+        jsonb_build_object('classification_type', $2::text),
+        NOW() - ($3 * INTERVAL '1 second')
+      )
+      "#,
+    )
+    .bind(domain)
+    .bind(classification_type)
+    .bind(seconds_ago)
+    .execute(pool)
+    .await
+    .unwrap();
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_recent_classified_by_type_filters_to_5min_window() {
+    let (_db, pool) = setup_test_db().await;
+
+    // Inside the 5-minute window (≤ 300 seconds ago).
+    insert_classified_event_at(&pool, "recent-a.com", "gaming", 10).await;
+    insert_classified_event_at(&pool, "recent-b.com", "gaming", 60).await;
+    insert_classified_event_at(&pool, "recent-c.com", "video-streaming", 200)
+      .await;
+
+    // Outside the 5-minute window — must be excluded.
+    insert_classified_event_at(&pool, "old-a.com", "gaming", 600).await;
+    insert_classified_event_at(&pool, "old-b.com", "video-streaming", 3600)
+      .await;
+
+    let stats = get_metrics_stats(&pool).await.unwrap();
+
+    assert_eq!(
+      stats
+        .recent_classified_by_type
+        .get("gaming")
+        .copied()
+        .unwrap_or(0),
+      2,
+      "only the two gaming events inside the 5-min window should be counted"
+    );
+    assert_eq!(
+      stats
+        .recent_classified_by_type
+        .get("video-streaming")
+        .copied()
+        .unwrap_or(0),
+      1,
+      "only the one video-streaming event inside the 5-min window should \
+       be counted"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_recent_classified_by_type_ignores_non_classified_actions() {
+    let (_db, pool) = setup_test_db().await;
+
+    // Recent classified event — counted.
+    insert_classified_event_at(&pool, "domain-a.com", "gaming", 30).await;
+
+    // Recent non-classified events with classification_type — NOT counted.
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classification_events
+        (domain, action, action_data, created_at)
+      VALUES
+        ('domain-b.com', 'classifying'::classification_action,
+         jsonb_build_object('classification_type', 'gaming'::text),
+         NOW() - INTERVAL '30 seconds'),
+        ('domain-c.com', 'error'::classification_action,
+         jsonb_build_object('classification_type', 'gaming'::text),
+         NOW() - INTERVAL '30 seconds')
+      "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let stats = get_metrics_stats(&pool).await.unwrap();
+
+    assert_eq!(
+      stats
+        .recent_classified_by_type
+        .get("gaming")
+        .copied()
+        .unwrap_or(0),
+      1,
+      "non-classified events should not contribute to recent_classified_by_type"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_recent_classified_by_type_skips_events_without_type() {
+    let (_db, pool) = setup_test_db().await;
+
+    // Recent classified event WITH classification_type — counted.
+    insert_classified_event_at(&pool, "with-type.com", "gaming", 30).await;
+
+    // Recent classified event WITHOUT classification_type — excluded.
+    insert_event_at(&pool, "no-type.com", "classified", 30).await;
+
+    let stats = get_metrics_stats(&pool).await.unwrap();
+
+    assert_eq!(
+      stats
+        .recent_classified_by_type
+        .get("gaming")
+        .copied()
+        .unwrap_or(0),
+      1
+    );
+    assert!(
+      !stats.recent_classified_by_type.contains_key(""),
+      "events without a classification_type should not create an empty-string key"
+    );
+  }
+
   // ── get_domain_status tests ───────────────────────────────────────────────
 
   #[tokio::test]

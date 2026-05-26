@@ -1,6 +1,245 @@
 #+title: DNS Smart Block - Tasks
 #+date: <2026-01-22 Wed>
 
+* Performance <2026-05-26 Tue>
+
+Root cause: silicon was sitting at ~24% sustained CPU.  Prometheus scrapes
+~/metrics~ every 10s (~globalConfig.scrape_interval = "10s"~ in the nix-config
+~prometheus-server~ module), and ~get_metrics_stats~ in
+~common/src/db/queries.rs:108~ fires ~10 sequential aggregating queries per
+scrape.  Live ~EXPLAIN (ANALYZE, BUFFERS)~ on silicon's production DB (485k
+events, 150k classifications, 57k domains) showed ~6.3s of DB work per 10s
+scrape — exactly the CPU envelope observed.
+
+Per-query measured timings (before → after fix):
+
+| Query                           |  Before |  After | Fix                                     |
+|---------------------------------+---------+--------+-----------------------------------------|
+| Q1 ~recent_classified_by_type~  |   53 ms | 0.1 ms | partial index                           |
+| Q2 grouped × 3 variants         |  683 ms | 155 ms | ~GROUP BY~ rewrite                      |
+| Q2 total × 3 variants           |  682 ms |  79 ms | ~GROUP BY~ rewrite                      |
+| Q3 ~events_by_action~           | 2117 ms | 631 ms | lateral join driving off ~domains~      |
+| Q5 ~get_blocked_domains~        |  496 ms |  34 ms | UNION rewrite (no CASE-expression sort) |
+
+Projected ~/metrics~ scrape: 6.3s → ~1.5s.  Each task below was validated
+against the live production DB; the index was tested via
+~CREATE INDEX CONCURRENTLY~ and then dropped pending a proper migration.
+
+** Database indexes
+
+*** TODO [#A] Add partial index on classified events by created_at
+
+*File:* new migration in ~migrations/~
+
+~recent_classified_by_type~ (~common/src/db/queries.rs:251~) filters
+~WHERE action = 'classified' AND created_at >= NOW() - INTERVAL '5 minutes'~.
+The only existing index covering ~action~ is ~idx_events_action(action)~,
+which forces a parallel seq scan over all 221k ~classified~ rows to find the
+~4 in the last 5 minutes.  Measured: 53 ms per scrape, ~5.3 s/min wasted.
+
+A partial index keyed on ~created_at~ scoped to ~action = 'classified'~ is
+~5 MB and reduces the query to a single index range scan.
+
+*Test first:*
+Add a test (or extend an existing metrics test in ~blocklist-server/src/db.rs~)
+that seeds a few thousand ~classified~ events with mixed ~created_at~ values
+and asserts ~recent_classified_by_type~ returns only those inside the 5-minute
+window.  The test doesn't need to assert timing; that's verified by EXPLAIN
+during the migration review.
+
+*Fix:*
+Create a new migration ~20260526000001_index_classified_events_recent.sql~:
+#+begin_src sql
+CREATE INDEX IF NOT EXISTS idx_events_classified_created_at
+  ON domain_classification_events (created_at DESC)
+  WHERE action = 'classified';
+#+end_src
+
+Measured payoff: 53 ms → 0.1 ms (~500×).
+
+** Query rewrites in ~common/src/db/queries.rs~
+
+Each of these targets the ~get_metrics_stats~ function and exercises a
+fundamental PostgreSQL planner limitation.  Indexes alone cannot fix any of
+the three because:
+
+- ~COUNT(DISTINCT col)~ always sorts/hashes to dedupe regardless of index.
+- PostgreSQL has no native loose-index-scan, so ~DISTINCT ON (domain)~ with no
+  ~WHERE~ clause sorts the whole table.
+- An ~ORDER BY~ on a non-indexable expression (~CASE WHEN ...~) forces a sort
+  even when the data is already in index order.
+
+*** TODO [#A] Rewrite COUNT(DISTINCT domain) as GROUP BY subquery (6 call sites)
+
+*File:* ~common/src/db/queries.rs~ (six query bodies in ~get_metrics_stats~)
+
+Affected queries (all six variants of "currently-valid domain count"):
+- ~current_classifications_by_type~ (line 111)
+- ~current_positive_by_type~ (line 130)
+- ~current_negative_by_type~ (line 149)
+- ~current_total~ (line 168)
+- ~current_positive_total~ (line 179)
+- ~current_negative_total~ (line 190)
+
+Each runs ~SELECT [classification_type,] COUNT(DISTINCT domain) FROM
+domain_classifications WHERE valid_on <= $1 AND valid_until > $1 [AND
+is_matching_site = ?]~ and spills to disk (~6 MB temp file per query for the
+grouped variants).  Replacing the ~COUNT(DISTINCT)~ with an inner
+~GROUP BY~ lets PostgreSQL use ~HashAggregate~ instead of a disk-spilling
+sort.
+
+*Test first:*
+The existing ~test_events_by_action_*~ tests in ~blocklist-server/src/db.rs~
+already cover ~get_metrics_stats~ correctness.  Extend them (or add a new
+test) to seed a domain that appears under multiple classification types
+within the same validity window, and assert that the domain is counted once
+per (domain, classification_type) pair — the same semantics as the original
+~COUNT(DISTINCT)~.
+
+*Fix:*
+Grouped variant:
+#+begin_src sql
+SELECT classification_type, COUNT(*) AS count FROM (
+  SELECT classification_type, domain
+  FROM domain_classifications
+  WHERE valid_on <= $1 AND valid_until > $1
+  GROUP BY classification_type, domain
+) d
+GROUP BY classification_type;
+#+end_src
+
+Total variant:
+#+begin_src sql
+SELECT COUNT(*) FROM (
+  SELECT domain
+  FROM domain_classifications
+  WHERE valid_on <= $1 AND valid_until > $1
+  GROUP BY domain
+) d;
+#+end_src
+
+Measured payoffs:
+- Grouped: 683 ms → 155 ms (~4.4×).
+- Total:   682 ms →  79 ms (~8.6×).
+- Positive/negative filter variants:   ~17 ms (parallel seq scan picked).
+
+*** TODO [#A] Rewrite events_by_action with lateral join over domains
+
+*File:* ~common/src/db/queries.rs:207~
+
+The current query is:
+#+begin_src sql
+SELECT action::text as action, COUNT(*) as count
+FROM (
+  SELECT DISTINCT ON (domain) action
+  FROM domain_classification_events
+  ORDER BY domain, created_at DESC
+) latest
+GROUP BY action;
+#+end_src
+
+This is the single worst offender at 2117 ms per scrape — it sorts all 484k
+events on ~(domain, created_at DESC)~ and writes a 35 MB temp file to disk
+*every 10 seconds*.
+
+The recursive-CTE loose-index-scan rewrite was tested and is actually slower
+(3090 ms — PostgreSQL executes the subplan twice and still sorts).  The
+working form is a lateral join driven off the ~domains~ table, which exploits
+the existing ~idx_events_domain_created (domain, created_at DESC)~ index for
+each per-domain lookup.
+
+Caveat: 59373 unique domains appear in ~domain_classification_events~ vs
+57244 in ~domains~ (a 4% gap).  Source of the gap is identified in the
+companion ~DomainRequeue~ task below.  Fix that first, then this rewrite has
+identical semantics to the original.
+
+*Test first:*
+Extend ~test_events_by_action_*~ in ~blocklist-server/src/db.rs~ with a case
+where ~domains~ has fewer rows than the event-domain set (e.g. a requeue
+without prior domain upsert) — and assert the rewrite still produces the
+same counts after the ~DomainRequeue~ upsert fix lands.
+
+*Fix:*
+#+begin_src sql
+SELECT t.action::text AS action, COUNT(*) AS count
+FROM domains d
+CROSS JOIN LATERAL (
+  SELECT action FROM domain_classification_events e
+  WHERE e.domain = d.domain
+  ORDER BY e.created_at DESC LIMIT 1
+) t
+GROUP BY t.action;
+#+end_src
+
+Measured payoff: 2117 ms → 631 ms (~3.4×).  Eliminates the disk sort entirely
+(plan switches to ~HashAggregate~).
+
+*** TODO [#A] Rewrite get_blocked_domains as UNION with NOT EXISTS
+
+*File:* ~common/src/db/queries.rs:17~
+
+The current query uses ~DISTINCT ON (domain) ... ORDER BY domain,
+CASE WHEN classification_type = $1 THEN 0 ELSE 1 END~ to express "per-type
+record wins, fall back to 'all' override".  The ~CASE~ expression is not
+indexable, so PostgreSQL always falls back to an external merge sort
+(6 MB temp file).  Called by Blocky's blocklist refresh — much less often
+than ~/metrics~, but still wasteful and gets worse as the table grows.
+
+*Test first:*
+The existing ~test_get_blocked_domains_specific_type_*_wins_over_all_*~
+tests in ~blocklist-server/src/db.rs~ already cover the override semantics.
+Verify the rewrite produces identical results on the existing test cases.
+
+*Fix:*
+#+begin_src sql
+WITH per_type AS (
+  SELECT domain, is_matching_site
+  FROM domain_classifications
+  WHERE classification_type = $1
+    AND valid_on <= $2 AND valid_until > $2
+),
+all_override AS (
+  SELECT a.domain, a.is_matching_site
+  FROM domain_classifications a
+  WHERE a.classification_type = 'all'
+    AND a.valid_on <= $2 AND a.valid_until > $2
+    AND NOT EXISTS (SELECT 1 FROM per_type p WHERE p.domain = a.domain)
+)
+SELECT domain FROM per_type      WHERE is_matching_site = true
+UNION
+SELECT domain FROM all_override  WHERE is_matching_site = true
+ORDER BY domain;
+#+end_src
+
+Measured payoff: 496 ms → 34 ms (~14×).
+
+** Schema invariant fix
+
+*** TODO [#B] Make DomainRequeue.requeue upsert the domain row
+
+*File:* ~common/src/db/models.rs:611~ (~DomainRequeue::requeue~)
+
+~DomainRequeue.requeue~ inserts a ~queued~ event without upserting the
+domain.  Every other event-writing path goes through ~DomainUpsert~ first.
+The result on silicon: 2129 domains (~4%) appear in
+~domain_classification_events~ but are absent from ~domains~.
+
+This breaks the implicit invariant "every event-domain has a ~domains~ row",
+which the ~events_by_action~ rewrite above relies on for accuracy.  It also
+silently undercounts those domains in any future query that drives off
+~domains~.
+
+*Test first:*
+Add a test that calls ~DomainRequeue { domain: "test.com" }.requeue(...)~
+on a fresh DB and asserts that ~SELECT EXISTS(SELECT 1 FROM domains WHERE
+domain = 'test.com')~ returns true.
+
+*Fix:*
+Inline the ~DomainUpsert~ call inside ~DomainRequeue::requeue~, identical to
+the pattern in ~exclude_rule_classify~, ~dns_nxdomain_classify~,
+~apply_admin_classification~, ~apply_pattern_classification~, and
+~classification_store~.
+
 * Audit <2026-03-28 Fri>
 
 Tasks from a comprehensive code audit.  Each task follows the pattern of first
