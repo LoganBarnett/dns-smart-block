@@ -229,16 +229,30 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
       .await?;
 
   // For each domain, only the latest event counts.
+  //
+  // Drives off the `domains` projection table with a lateral per-domain
+  // index lookup against `idx_events_domain_created (domain, created_at
+  // DESC)`.  PostgreSQL has no native loose-index-scan, so the natural
+  // `DISTINCT ON (domain) ... ORDER BY domain, created_at DESC` form
+  // ends up sorting every event row and spilling to disk on each
+  // 10-second Prometheus scrape.  This form was measured ~3.4x faster
+  // on a 485k-event production dataset (2117 ms → 631 ms).
+  //
+  // Correctness depends on the "every event-domain has a `domains` row"
+  // invariant — enforced at the event-insert layer in
+  // `ClassificationEventInsert.insert` and backfilled by migration
+  // 20260526000002.  See tasks.org "Performance 2026-05-26".
   let events_by_action_rows = sqlx::query(
     r#"
-        SELECT action::text as action, COUNT(*) as count
-        FROM (
-          SELECT DISTINCT ON (domain) action
-          FROM domain_classification_events
-          ORDER BY domain, created_at DESC
-        ) latest
-        GROUP BY action
-        "#,
+    SELECT t.action::text AS action, COUNT(*) AS count
+    FROM domains d
+    CROSS JOIN LATERAL (
+      SELECT action FROM domain_classification_events e
+      WHERE e.domain = d.domain
+      ORDER BY e.created_at DESC LIMIT 1
+    ) t
+    GROUP BY t.action
+    "#,
   )
   .fetch_all(pool)
   .await?;

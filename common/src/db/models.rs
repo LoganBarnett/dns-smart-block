@@ -133,13 +133,26 @@ pub struct ClassificationEventInsert {
 impl ClassificationEventInsert {
   /// Insert this event into the database.  Accepts any Postgres executor so
   /// callers can pass either a pool or an in-flight transaction.
+  ///
+  /// The CTE upsert enforces the invariant that every event-domain has a
+  /// corresponding row in `domains`.  Without it, paths that write
+  /// `classifying`/`error`/`queued` events without ever reaching the
+  /// `classified` success path (which goes through `classification_store`)
+  /// would create orphan event-domains that aggregations driving off the
+  /// `domains` projection table would silently undercount.
   pub async fn insert(
     &self,
     executor: impl sqlx::Executor<'_, Database = Postgres>,
   ) -> Result<PgQueryResult, sqlx::Error> {
     sqlx::query(
       r#"
-      INSERT INTO domain_classification_events (domain, action, action_data, source_id, created_at)
+      WITH ensure_domain AS (
+        INSERT INTO domains (domain, last_updated)
+        VALUES ($1, NOW())
+        ON CONFLICT (domain) DO UPDATE SET last_updated = NOW()
+      )
+      INSERT INTO domain_classification_events
+        (domain, action, action_data, source_id, created_at)
       VALUES ($1, $2::classification_action, $3, $4, NOW())
       "#,
     )
@@ -147,6 +160,36 @@ impl ClassificationEventInsert {
     .bind(&self.action)
     .bind(&self.action_data)
     .bind(self.source_id)
+    .execute(executor)
+    .await
+  }
+
+  /// Same as `insert` but stamps the event with an explicit `created_at`.
+  /// Used by callers like `DomainExpire::expire` that need the event log
+  /// timestamp to match the timestamp of a sibling write (so the event
+  /// row and the projection it audits land at the same instant).
+  pub async fn insert_at(
+    &self,
+    executor: impl sqlx::Executor<'_, Database = Postgres>,
+    created_at: DateTime<Utc>,
+  ) -> Result<PgQueryResult, sqlx::Error> {
+    sqlx::query(
+      r#"
+      WITH ensure_domain AS (
+        INSERT INTO domains (domain, last_updated)
+        VALUES ($1, $5)
+        ON CONFLICT (domain) DO UPDATE SET last_updated = $5
+      )
+      INSERT INTO domain_classification_events
+        (domain, action, action_data, source_id, created_at)
+      VALUES ($1, $2::classification_action, $3, $4, $5)
+      "#,
+    )
+    .bind(&self.domain)
+    .bind(&self.action)
+    .bind(&self.action_data)
+    .bind(self.source_id)
+    .bind(created_at)
     .execute(executor)
     .await
   }
@@ -583,15 +626,13 @@ impl DomainExpire {
     .execute(&mut **tx)
     .await?;
 
-    sqlx::query(
-      r#"
-      INSERT INTO domain_classification_events (domain, action, action_data, created_at)
-      VALUES ($1, 'expired'::classification_action, '{}'::jsonb, $2)
-      "#,
-    )
-    .bind(&self.domain)
-    .bind(now)
-    .execute(&mut **tx)
+    ClassificationEventInsert {
+      domain: self.domain.clone(),
+      action: "expired".to_string(),
+      action_data: serde_json::json!({}),
+      source_id: None,
+    }
+    .insert_at(&mut **tx, now)
     .await?;
 
     Ok(result)
@@ -609,21 +650,21 @@ pub struct DomainRequeue {
 }
 
 impl DomainRequeue {
-  /// Insert a `queued` event for the domain.
+  /// Insert a `queued` event for the domain.  The underlying event insert
+  /// upserts the `domains` row as a side effect, so requeueing a domain
+  /// that was previously only seen via `classifying`/`error` events still
+  /// surfaces it in projection-table queries.
   pub async fn requeue(
     &self,
     tx: &mut Transaction<'_, Postgres>,
   ) -> Result<(), sqlx::Error> {
-    let now = Utc::now();
-    sqlx::query(
-      r#"
-      INSERT INTO domain_classification_events (domain, action, action_data, created_at)
-      VALUES ($1, 'queued'::classification_action, '{}'::jsonb, $2)
-      "#,
-    )
-    .bind(&self.domain)
-    .bind(now)
-    .execute(&mut **tx)
+    ClassificationEventInsert {
+      domain: self.domain.clone(),
+      action: "queued".to_string(),
+      action_data: serde_json::json!({}),
+      source_id: None,
+    }
+    .insert(&mut **tx)
     .await?;
     Ok(())
   }

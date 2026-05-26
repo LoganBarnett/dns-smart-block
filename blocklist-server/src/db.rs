@@ -465,24 +465,25 @@ mod tests {
   }
 
   // Helper to insert an event with an explicit timestamp offset from NOW().
+  // Routes through `ClassificationEventInsert::insert_at` rather than raw
+  // SQL so the test path exercises the same domain-upsert side effect that
+  // production paths do.
   async fn insert_event_at(
     pool: &PgPool,
     domain: &str,
     action: &str,
     seconds_ago: i64,
-  ) {
-    sqlx::query(
-      r#"
-      INSERT INTO domain_classification_events (domain, action, action_data, created_at)
-      VALUES ($1, $2::classification_action, '{}'::jsonb, NOW() - ($3 * INTERVAL '1 second'))
-      "#,
-    )
-    .bind(domain)
-    .bind(action)
-    .bind(seconds_ago)
-    .execute(pool)
-    .await
-    .unwrap();
+  ) -> Result<(), sqlx::Error> {
+    let created_at = Utc::now() - Duration::seconds(seconds_ago);
+    ClassificationEventInsert {
+      domain: domain.to_string(),
+      action: action.to_string(),
+      action_data: serde_json::json!({}),
+      source_id: None,
+    }
+    .insert_at(pool, created_at)
+    .await?;
+    Ok(())
   }
 
   #[tokio::test]
@@ -492,10 +493,18 @@ mod tests {
 
     // domain-a: classifying → error → classifying → classified
     // Only "classified" (the latest) should be counted.
-    insert_event_at(&pool, "domain-a.com", "classifying", 30).await;
-    insert_event_at(&pool, "domain-a.com", "error", 20).await;
-    insert_event_at(&pool, "domain-a.com", "classifying", 10).await;
-    insert_event_at(&pool, "domain-a.com", "classified", 5).await;
+    insert_event_at(&pool, "domain-a.com", "classifying", 30)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "domain-a.com", "error", 20)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "domain-a.com", "classifying", 10)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "domain-a.com", "classified", 5)
+      .await
+      .unwrap();
 
     let stats = get_metrics_stats(&pool).await.unwrap();
 
@@ -524,15 +533,25 @@ mod tests {
     let (_db, pool) = setup_test_db().await;
 
     // domain-a: ended up classified
-    insert_event_at(&pool, "domain-a.com", "classifying", 20).await;
-    insert_event_at(&pool, "domain-a.com", "classified", 10).await;
+    insert_event_at(&pool, "domain-a.com", "classifying", 20)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "domain-a.com", "classified", 10)
+      .await
+      .unwrap();
 
     // domain-b: ended up in error
-    insert_event_at(&pool, "domain-b.com", "classifying", 20).await;
-    insert_event_at(&pool, "domain-b.com", "error", 10).await;
+    insert_event_at(&pool, "domain-b.com", "classifying", 20)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "domain-b.com", "error", 10)
+      .await
+      .unwrap();
 
     // domain-c: still classifying
-    insert_event_at(&pool, "domain-c.com", "classifying", 5).await;
+    insert_event_at(&pool, "domain-c.com", "classifying", 5)
+      .await
+      .unwrap();
 
     let stats = get_metrics_stats(&pool).await.unwrap();
 
@@ -570,34 +589,109 @@ mod tests {
     assert!(stats.events_by_action.is_empty());
   }
 
+  // ── event-insert domain-upsert invariant tests ────────────────────────────
+
+  // Returns whether a `domains` row exists for the given domain.
+  async fn domain_exists(
+    pool: &PgPool,
+    domain: &str,
+  ) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM domains WHERE domain = $1)")
+      .bind(domain)
+      .fetch_one(pool)
+      .await
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_classification_event_insert_upserts_domain() {
+    let (_db, pool) = setup_test_db().await;
+
+    // Sanity: domain must not exist before the event insert.
+    assert!(!domain_exists(&pool, "fresh.com").await.unwrap());
+
+    ClassificationEventInsert {
+      domain: "fresh.com".to_string(),
+      action: "classifying".to_string(),
+      action_data: serde_json::json!({}),
+      source_id: None,
+    }
+    .insert(&pool)
+    .await
+    .unwrap();
+
+    assert!(
+      domain_exists(&pool, "fresh.com").await.unwrap(),
+      "event-insert path must upsert the domains row"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_domain_requeue_upserts_domain() {
+    let (_db, pool) = setup_test_db().await;
+
+    assert!(!domain_exists(&pool, "requeue-me.com").await.unwrap());
+
+    let mut tx = pool.begin().await.unwrap();
+    DomainRequeue {
+      domain: "requeue-me.com".to_string(),
+    }
+    .requeue(&mut tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+      domain_exists(&pool, "requeue-me.com").await.unwrap(),
+      "DomainRequeue.requeue must upsert the domains row"
+    );
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_domain_expire_upserts_domain() {
+    let (_db, pool) = setup_test_db().await;
+
+    assert!(!domain_exists(&pool, "expire-me.com").await.unwrap());
+
+    let mut tx = pool.begin().await.unwrap();
+    DomainExpire {
+      domain: "expire-me.com".to_string(),
+    }
+    .expire(&mut tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+      domain_exists(&pool, "expire-me.com").await.unwrap(),
+      "DomainExpire.expire must upsert the domains row"
+    );
+  }
+
   // ── recent_classified_by_type tests ───────────────────────────────────────
 
   // Helper to insert a "classified" event with a classification_type in
-  // action_data at a specific timestamp offset from NOW().  Returns `Result`
-  // so callers stay in control of error handling and so this helper can be
-  // promoted to runtime without a panic-laundering refactor.
+  // action_data at a specific timestamp offset from NOW().  Routes through
+  // `ClassificationEventInsert::insert_at` so the test path exercises the
+  // same domain-upsert side effect production paths do.
   async fn insert_classified_event_at(
     pool: &PgPool,
     domain: &str,
     classification_type: &str,
     seconds_ago: i64,
   ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-      r#"
-      INSERT INTO domain_classification_events
-        (domain, action, action_data, created_at)
-      VALUES (
-        $1,
-        'classified'::classification_action,
-        jsonb_build_object('classification_type', $2::text),
-        NOW() - ($3 * INTERVAL '1 second')
-      )
-      "#,
-    )
-    .bind(domain)
-    .bind(classification_type)
-    .bind(seconds_ago)
-    .execute(pool)
+    let created_at = Utc::now() - Duration::seconds(seconds_ago);
+    ClassificationEventInsert {
+      domain: domain.to_string(),
+      action: "classified".to_string(),
+      action_data: serde_json::json!({
+        "classification_type": classification_type,
+      }),
+      source_id: None,
+    }
+    .insert_at(pool, created_at)
     .await?;
     Ok(())
   }
@@ -701,7 +795,9 @@ mod tests {
       .unwrap();
 
     // Recent classified event WITHOUT classification_type — excluded.
-    insert_event_at(&pool, "no-type.com", "classified", 30).await;
+    insert_event_at(&pool, "no-type.com", "classified", 30)
+      .await
+      .unwrap();
 
     let stats = get_metrics_stats(&pool).await.unwrap();
 
@@ -1055,17 +1151,26 @@ mod tests {
     let (_db, pool) = setup_test_db().await;
 
     // Insert a few events for the domain without creating classifications.
-    insert_event_at(&pool, "event-domain.com", "classifying", 30).await;
-    insert_event_at(&pool, "event-domain.com", "error", 20).await;
-    insert_event_at(&pool, "event-domain.com", "classifying", 10).await;
-    insert_event_at(&pool, "event-domain.com", "classified", 5).await;
+    insert_event_at(&pool, "event-domain.com", "classifying", 30)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "event-domain.com", "error", 20)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "event-domain.com", "classifying", 10)
+      .await
+      .unwrap();
+    insert_event_at(&pool, "event-domain.com", "classified", 5)
+      .await
+      .unwrap();
 
     let status = get_domain_status(&pool, "event-domain.com")
       .await
       .expect("get_domain_status failed");
 
-    // domain was never inserted into `domains`, but events exist.
-    assert!(!status.exists);
+    // The event-insert path now upserts the `domains` row, so a domain seen
+    // only via classifying/error events still surfaces here.
+    assert!(status.exists);
     assert_eq!(
       status.recent_events.len(),
       4,

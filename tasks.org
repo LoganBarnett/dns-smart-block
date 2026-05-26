@@ -125,7 +125,8 @@ Measured payoffs:
 - Total:   682 ms →  79 ms (~8.6×).
 - Positive/negative filter variants:   ~17 ms (parallel seq scan picked).
 
-*** TODO [#A] Rewrite events_by_action with lateral join over domains
+*** DONE [#A] Rewrite events_by_action with lateral join over domains
+CLOSED: [2026-05-26 Tue]
 
 *File:* ~common/src/db/queries.rs:207~
 
@@ -217,7 +218,8 @@ Measured payoff: 496 ms → 34 ms (~14×).
 
 ** Schema invariant fix
 
-*** TODO [#B] Make DomainRequeue.requeue upsert the domain row
+*** DONE [#B] Make DomainRequeue.requeue upsert the domain row
+CLOSED: [2026-05-26 Tue]
 
 *File:* ~common/src/db/models.rs:611~ (~DomainRequeue::requeue~)
 
