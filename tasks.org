@@ -293,32 +293,132 @@ line-by-line through ~tokio::io::BufReader~, each line passed to
    could grow without bound.  Check whether there is backpressure or a
    bounded send buffer.
 
-*Test first:*
-The leak is observable, not deterministic-input-driven, so a unit test
-is hard.  Two viable approaches:
+*Diagnostic plan — profile under dhat-rs:*
 
-1. *Load-driven integration test* — spawn the log-processor against a
-   mock journal source that emits a large fixed number of lines (e.g.
-   1M synthetic blocky log lines), record RSS at start and end, assert
-   the delta is below a sane bound (e.g. < 50 MB regardless of input
-   size).  Heavy to set up but reproduces the live signal.
-2. *Profiling-driven* — run the binary under ~heaptrack~ (or
-   ~jemalloc~'s built-in profiling) against the same synthetic stream
-   and inspect the allocation graph for the dominant retain path.  No
-   test artifact, but it tells you precisely which line allocates the
-   non-reclaimed memory.
+Diagnosing the leak with a unit test alone is hard (the leak is
+behavioral, not deterministic-input-driven).  ~dhat-rs~ swaps the global
+allocator and records every Rust allocation with a backtrace, then dumps
+a JSON viewable in a fully client-side viewer.  Enable via a cargo
+feature flag, run on silicon under the real journal load for a few
+minutes, retrieve the JSON, inspect.
 
-Start with (2) — it's cheap and points directly at the culprit.  Add (1)
-as a regression guard once the fix is in.
+Choice of profiler is ~dhat-rs~ over ~heaptrack~ because it can be
+wired in as a build-time feature flag inside the project; heaptrack
+needs LD_PRELOAD wrapping of ExecStart, debug-info builds, and a
+sandbox-writable output dir, all of which are awkward in the existing
+NixOS module shape.  If dhat-rs results turn out to point at a C-side
+allocation (unlikely — every dep in the hot loop is Rust), escalate
+to heaptrack.
+
+Implementation pieces, each a discrete subtask:
+
+1. *Cargo feature in log-processor.*  Add ~dhat = { version = "0.3",
+   optional = true }~ in ~log-processor/Cargo.toml~ behind a
+   ~profiling~ feature.  In ~log-processor/src/main.rs~, behind
+   ~#[cfg(feature = "profiling")]~:
+   - swap the global allocator to ~dhat::Alloc~,
+   - init ~dhat::Profiler::new_heap()~ at the top of ~main~ and bind
+     to a ~_profiler~ local so its ~Drop~ fires on scope exit.
+
+2. *Graceful SIGTERM/SIGINT handling in log-processor.*  Worth doing
+   independently of profiling — the service currently has no graceful
+   shutdown path, so any in-flight NATS publish on stop is dropped.
+   Wrap the main stream loop in a ~tokio::select!~ that also listens
+   for ~tokio::signal::ctrl_c()~ and
+   ~tokio::signal::unix::signal(SignalKind::terminate())~; on either
+   signal, break the loop so ~main~ returns through the normal
+   scope-end path and any ~Drop~ impls (including the ~Profiler~) run.
+
+3. *Nix derivation accepts an enableProfiling argument.*  Wherever the
+   ~dns-smart-block-log-processor~ derivation is built, add
+   ~enableProfiling ? false~ and append ~--features profiling~ to the
+   cargo build flags when true.
+
+4. *NixOS module option + apply transform.*  In ~nix/nixos-module.nix~:
+   - add ~services.dns-smart-block.logProcessor.profiling.enable~
+     (bool, default false),
+   - attach an ~apply~ to the existing ~logProcessor.package~ option:
+     #+begin_src nix
+     apply = pkg:
+       if config.services.dns-smart-block.logProcessor.profiling.enable
+       then pkg.override { enableProfiling = true; }
+       else pkg;
+     #+end_src
+   - this lets ~apply~ transform whatever the host (or default) set
+     for ~package~ into the profiling-enabled form, single source of
+     truth, no host-side ~mkDefault~ gymnastics.
+   - gate the systemd unit's ~StateDirectory~ and ~WorkingDirectory~
+     on the profiling flag so ~dhat-heap.json~ lands in a writable,
+     known location:
+     #+begin_src nix
+     systemd.services.dns-smart-block-log-processor.serviceConfig =
+       lib.mkIf cfg.logProcessor.profiling.enable {
+         StateDirectory = "dns-smart-block-log-processor-profiling";
+         WorkingDirectory =
+           "/var/lib/dns-smart-block-log-processor-profiling";
+       };
+     #+end_src
+
+5. *Vendored ~dh_view~ viewer.*  ~dhat-heap.json~ ships with no PII
+   (sizes + backtrace frames only, no buffer contents), but to avoid
+   loading it via nnethercote.github.io even client-side, package the
+   two static viewer files into a Nix derivation:
+   #+begin_src nix
+   # derivations/dh-view/default.nix
+   pkgs.fetchFromGitHub {
+     owner = "nnethercote"; repo = "dhat";
+     rev = "<pinned>"; hash = "...";
+     sparseCheckout = [ "dh_view" ];
+   }
+   #+end_src
+   Open ~file://.../dh_view.html~ in a browser, no network involved.
+
+*Retrieval flow once the above is in place:*
+
+#+begin_src sh
+# Enable profiling on silicon
+# In hosts/silicon.nix (nix-config-private):
+#   services.dns-smart-block.logProcessor.profiling.enable = true;
+proton-deploy switch silicon
+
+# Wait ~5 minutes for the leak to manifest, then trigger graceful shutdown
+ssh silicon.proton sudo systemctl stop dns-smart-block-log-processor
+
+# Retrieve the heap profile (DynamicUser owns it under an ephemeral UID,
+# so sudo cat through the indirection is the simplest route)
+ssh silicon.proton \
+  'sudo cat /var/lib/dns-smart-block-log-processor-profiling/dhat-heap.json' \
+  > dhat-heap.json
+
+# View locally via the vendored dh_view derivation
+open "$(nix build --print-out-paths .#dh-view)/dh_view/dh_view.html"
+# load dhat-heap.json in the viewer
+#
+# Disable profiling and redeploy when done
+```
+#+end_src
+
+*Suspected culprits, in order of likelihood (from the hot-loop audit):*
+
+1. *Subprocess output buffering.*  ~log_source.rs~ reads ~child.stdout~
+   through ~BufReader::new(stdout).lines()~.  If the subprocess emits
+   lines faster than the parser+publisher consumes them, ~BufReader~
+   accumulates.  Need to confirm there is no unbounded internal queue.
+2. *Regex captures retained.*  ~parser.parse_log_line~ may be cloning or
+   capturing more than the matched domain string per line.  Need to
+   audit whether anything per-line escapes the loop iteration.
+3. *NATS publisher state.*  ~async-nats~ ~publish~ is fire-and-forget;
+   if publishes are queued and the server lags, the client-side queue
+   could grow without bound.  Check whether there is backpressure or a
+   bounded send buffer.
 
 *Fix:*
-Depends on which suspect (1)/(2)/(3) above turns out to be the cause.
-Likely candidates: bound the ~BufReader~ internal buffer; switch from
-~async-stream~ ~yield~ to direct channel send with bounded capacity;
-periodically call ~regex::Regex::clear_cache~ or replace per-line
-allocations with reused buffers; use ~async-nats~'s publish-with-ack
-form (or a bounded ~mpsc~ in front of it) if the unbounded fire-and-
-forget queue is the issue.
+Depends on which suspect the dhat profile fingers.  Likely candidates:
+bound the ~BufReader~ internal buffer; switch from ~async-stream~
+~yield~ to direct channel send with bounded capacity; periodically call
+~regex::Regex::clear_cache~ or replace per-line allocations with reused
+buffers; use ~async-nats~'s publish-with-ack form (or a bounded ~mpsc~
+in front of it) if the unbounded fire-and-forget queue is the issue.
 
 * Audit <2026-03-28 Fri>
 
