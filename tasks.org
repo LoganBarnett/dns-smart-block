@@ -177,7 +177,8 @@ GROUP BY t.action;
 Measured payoff: 2117 ms → 631 ms (~3.4×).  Eliminates the disk sort entirely
 (plan switches to ~HashAggregate~).
 
-*** TODO [#A] Rewrite get_blocked_domains as UNION with NOT EXISTS
+*** DONE [#A] Rewrite get_blocked_domains as UNION with NOT EXISTS
+CLOSED: [2026-05-26 Tue]
 
 *File:* ~common/src/db/queries.rs:17~
 
@@ -243,6 +244,81 @@ Inline the ~DomainUpsert~ call inside ~DomainRequeue::requeue~, identical to
 the pattern in ~exclude_rule_classify~, ~dns_nxdomain_classify~,
 ~apply_admin_classification~, ~apply_pattern_classification~, and
 ~classification_store~.
+
+** Memory leak
+
+*** TODO [#A] log-processor leaks memory at ~150 MB/min until restart
+
+*Service:* ~dns-smart-block-log-processor~ (binary in ~log-processor/~).
+
+Surfaced while watching silicon's overall memory after the Performance
+deploys went out.  Each deploy reset the log-processor to a few MB and
+memory dropped from ~50% to ~30% host-wide; between deploys the service
+climbs back up.  Measured on silicon shortly after a deploy:
+
+#+begin_example
+dns-smart-block-blocklist-server    1.4 MB   (Peak: 2 MB)     up 11 min
+dns-smart-block-log-processor       1.6 GB   (Peak: 1.6 GB)   up 11 min
+dns-smart-block-queue-processor    12.5 MB   (Peak: 15.8 MB)  up 11 min
+#+end_example
+
+Peak == current → it's still growing.  Extrapolating from 1.6 GB in 11
+minutes, the service would consume the whole host within an hour or so
+were systemd not eventually intervening (or were the host not running
+other things).  This is the source of the host-wide memory drop the user
+observed at each deploy this morning; it is not a one-time accounting
+artifact.
+
+The other two services in the same crate workspace (blocklist-server,
+queue-processor) sharing most of the same dependency tree do *not* leak,
+so the cause is almost certainly local to log-processor's hot loop
+(~log-processor/src/main.rs~ and ~log-processor/src/log_source.rs~) or
+to a dependency only it uses (e.g. ~notify~, ~async-stream~) — not in
+the shared ~common~ crate or ~async-nats~ alone.
+
+The hot loop is small: ~journalctl -f -u blocky~ as a subprocess streamed
+line-by-line through ~tokio::io::BufReader~, each line passed to
+~parser.parse_log_line~, matched lines published to NATS via
+~queue.publish_domain~.  Suspected culprits, in order of likelihood:
+
+1. *Subprocess output buffering.*  ~log_source.rs~ reads ~child.stdout~
+   through ~BufReader::new(stdout).lines()~.  If the subprocess emits
+   lines faster than the parser+publisher consumes them, ~BufReader~
+   accumulates.  Need to confirm there is no unbounded internal queue.
+2. *Regex captures retained.*  ~parser.parse_log_line~ may be cloning or
+   capturing more than the matched domain string per line.  Need to
+   audit whether anything per-line escapes the loop iteration.
+3. *NATS publisher state.*  ~async-nats~ ~publish~ is fire-and-forget;
+   if publishes are queued and the server lags, the client-side queue
+   could grow without bound.  Check whether there is backpressure or a
+   bounded send buffer.
+
+*Test first:*
+The leak is observable, not deterministic-input-driven, so a unit test
+is hard.  Two viable approaches:
+
+1. *Load-driven integration test* — spawn the log-processor against a
+   mock journal source that emits a large fixed number of lines (e.g.
+   1M synthetic blocky log lines), record RSS at start and end, assert
+   the delta is below a sane bound (e.g. < 50 MB regardless of input
+   size).  Heavy to set up but reproduces the live signal.
+2. *Profiling-driven* — run the binary under ~heaptrack~ (or
+   ~jemalloc~'s built-in profiling) against the same synthetic stream
+   and inspect the allocation graph for the dominant retain path.  No
+   test artifact, but it tells you precisely which line allocates the
+   non-reclaimed memory.
+
+Start with (2) — it's cheap and points directly at the culprit.  Add (1)
+as a regression guard once the fix is in.
+
+*Fix:*
+Depends on which suspect (1)/(2)/(3) above turns out to be the cause.
+Likely candidates: bound the ~BufReader~ internal buffer; switch from
+~async-stream~ ~yield~ to direct channel send with bounded capacity;
+periodically call ~regex::Regex::clear_cache~ or replace per-line
+allocations with reused buffers; use ~async-nats~'s publish-with-ack
+form (or a bounded ~mpsc~ in front of it) if the unbounded fire-and-
+forget queue is the issue.
 
 * Audit <2026-03-28 Fri>
 
