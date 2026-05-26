@@ -108,11 +108,21 @@ pub struct MetricsStats {
 pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
   let now = Utc::now();
 
+  // The six "currently-valid distinct domain" counts below all replace the
+  // natural `COUNT(DISTINCT domain)` form with an inner `GROUP BY domain`
+  // subquery.  PostgreSQL's planner consistently underestimates the
+  // aggregation cost of `COUNT(DISTINCT)` on this table and spills the dedupe
+  // sort to disk; an inner `GROUP BY` lets the planner pick `HashAggregate`,
+  // measured ~4-9x faster on a 150k-row production dataset.  See tasks.org
+  // "Performance 2026-05-26" for the EXPLAIN comparison.
   let current_by_type_rows = sqlx::query(
     r#"
-    SELECT classification_type, COUNT(DISTINCT domain) as count
-    FROM domain_classifications
-    WHERE valid_on <= $1 AND valid_until > $1
+    SELECT classification_type, COUNT(*) AS count FROM (
+      SELECT classification_type, domain
+      FROM domain_classifications
+      WHERE valid_on <= $1 AND valid_until > $1
+      GROUP BY classification_type, domain
+    ) d
     GROUP BY classification_type
     "#,
   )
@@ -129,9 +139,12 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
 
   let current_positive_rows = sqlx::query(
     r#"
-    SELECT classification_type, COUNT(DISTINCT domain) as count
-    FROM domain_classifications
-    WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
+    SELECT classification_type, COUNT(*) AS count FROM (
+      SELECT classification_type, domain
+      FROM domain_classifications
+      WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
+      GROUP BY classification_type, domain
+    ) d
     GROUP BY classification_type
     "#,
   )
@@ -148,9 +161,12 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
 
   let current_negative_rows = sqlx::query(
     r#"
-    SELECT classification_type, COUNT(DISTINCT domain) as count
-    FROM domain_classifications
-    WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
+    SELECT classification_type, COUNT(*) AS count FROM (
+      SELECT classification_type, domain
+      FROM domain_classifications
+      WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
+      GROUP BY classification_type, domain
+    ) d
     GROUP BY classification_type
     "#,
   )
@@ -167,10 +183,13 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
 
   let current_total: i64 = sqlx::query_scalar(
     r#"
-        SELECT COUNT(DISTINCT domain)
-        FROM domain_classifications
-        WHERE valid_on <= $1 AND valid_until > $1
-        "#,
+    SELECT COUNT(*) FROM (
+      SELECT domain
+      FROM domain_classifications
+      WHERE valid_on <= $1 AND valid_until > $1
+      GROUP BY domain
+    ) d
+    "#,
   )
   .bind(now)
   .fetch_one(pool)
@@ -178,10 +197,13 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
 
   let current_positive_total: i64 = sqlx::query_scalar(
     r#"
-        SELECT COUNT(DISTINCT domain)
-        FROM domain_classifications
-        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
-        "#,
+    SELECT COUNT(*) FROM (
+      SELECT domain
+      FROM domain_classifications
+      WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = true
+      GROUP BY domain
+    ) d
+    "#,
   )
   .bind(now)
   .fetch_one(pool)
@@ -189,10 +211,13 @@ pub async fn get_metrics_stats(pool: &PgPool) -> Result<MetricsStats, DbError> {
 
   let current_negative_total: i64 = sqlx::query_scalar(
     r#"
-        SELECT COUNT(DISTINCT domain)
-        FROM domain_classifications
-        WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
-        "#,
+    SELECT COUNT(*) FROM (
+      SELECT domain
+      FROM domain_classifications
+      WHERE valid_on <= $1 AND valid_until > $1 AND is_matching_site = false
+      GROUP BY domain
+    ) d
+    "#,
   )
   .bind(now)
   .fetch_one(pool)

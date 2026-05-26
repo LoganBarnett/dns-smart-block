@@ -573,13 +573,15 @@ mod tests {
   // ── recent_classified_by_type tests ───────────────────────────────────────
 
   // Helper to insert a "classified" event with a classification_type in
-  // action_data at a specific timestamp offset from NOW().
+  // action_data at a specific timestamp offset from NOW().  Returns `Result`
+  // so callers stay in control of error handling and so this helper can be
+  // promoted to runtime without a panic-laundering refactor.
   async fn insert_classified_event_at(
     pool: &PgPool,
     domain: &str,
     classification_type: &str,
     seconds_ago: i64,
-  ) {
+  ) -> Result<(), sqlx::Error> {
     sqlx::query(
       r#"
       INSERT INTO domain_classification_events
@@ -596,8 +598,8 @@ mod tests {
     .bind(classification_type)
     .bind(seconds_ago)
     .execute(pool)
-    .await
-    .unwrap();
+    .await?;
+    Ok(())
   }
 
   #[tokio::test]
@@ -606,15 +608,23 @@ mod tests {
     let (_db, pool) = setup_test_db().await;
 
     // Inside the 5-minute window (≤ 300 seconds ago).
-    insert_classified_event_at(&pool, "recent-a.com", "gaming", 10).await;
-    insert_classified_event_at(&pool, "recent-b.com", "gaming", 60).await;
+    insert_classified_event_at(&pool, "recent-a.com", "gaming", 10)
+      .await
+      .unwrap();
+    insert_classified_event_at(&pool, "recent-b.com", "gaming", 60)
+      .await
+      .unwrap();
     insert_classified_event_at(&pool, "recent-c.com", "video-streaming", 200)
-      .await;
+      .await
+      .unwrap();
 
     // Outside the 5-minute window — must be excluded.
-    insert_classified_event_at(&pool, "old-a.com", "gaming", 600).await;
+    insert_classified_event_at(&pool, "old-a.com", "gaming", 600)
+      .await
+      .unwrap();
     insert_classified_event_at(&pool, "old-b.com", "video-streaming", 3600)
-      .await;
+      .await
+      .unwrap();
 
     let stats = get_metrics_stats(&pool).await.unwrap();
 
@@ -645,7 +655,9 @@ mod tests {
     let (_db, pool) = setup_test_db().await;
 
     // Recent classified event — counted.
-    insert_classified_event_at(&pool, "domain-a.com", "gaming", 30).await;
+    insert_classified_event_at(&pool, "domain-a.com", "gaming", 30)
+      .await
+      .unwrap();
 
     // Recent non-classified events with classification_type — NOT counted.
     sqlx::query(
@@ -684,7 +696,9 @@ mod tests {
     let (_db, pool) = setup_test_db().await;
 
     // Recent classified event WITH classification_type — counted.
-    insert_classified_event_at(&pool, "with-type.com", "gaming", 30).await;
+    insert_classified_event_at(&pool, "with-type.com", "gaming", 30)
+      .await
+      .unwrap();
 
     // Recent classified event WITHOUT classification_type — excluded.
     insert_event_at(&pool, "no-type.com", "classified", 30).await;
@@ -702,6 +716,207 @@ mod tests {
     assert!(
       !stats.recent_classified_by_type.contains_key(""),
       "events without a classification_type should not create an empty-string key"
+    );
+  }
+
+  // ── current_* count tests (dedupe semantics) ──────────────────────────────
+
+  // Helper to insert a currently-valid classification row.  Each call adds a
+  // new row even when (domain, classification_type) is repeated — that is the
+  // dedupe scenario these tests exist to exercise.  Returns `Result` so
+  // callers stay in control of error handling.
+  async fn insert_current_classification(
+    pool: &PgPool,
+    domain: &str,
+    classification_type: &str,
+    is_matching_site: bool,
+    source_id: i32,
+  ) -> Result<(), sqlx::Error> {
+    sqlx::query(
+      "INSERT INTO domains (domain, last_updated) VALUES ($1, NOW()) \
+       ON CONFLICT (domain) DO NOTHING",
+    )
+    .bind(domain)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence,
+        valid_on, valid_until, model, source_id, created_at
+      )
+      VALUES ($1, $2, $3, 0.9,
+              NOW(), NOW() + INTERVAL '10 days',
+              'test-model', $4, NOW())
+      "#,
+    )
+    .bind(domain)
+    .bind(classification_type)
+    .bind(is_matching_site)
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+  }
+
+  // Helper to insert a classification whose validity window is in the past.
+  async fn insert_expired_classification(
+    pool: &PgPool,
+    domain: &str,
+    classification_type: &str,
+    is_matching_site: bool,
+    source_id: i32,
+  ) -> Result<(), sqlx::Error> {
+    sqlx::query(
+      "INSERT INTO domains (domain, last_updated) VALUES ($1, NOW()) \
+       ON CONFLICT (domain) DO NOTHING",
+    )
+    .bind(domain)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+      r#"
+      INSERT INTO domain_classifications (
+        domain, classification_type, is_matching_site, confidence,
+        valid_on, valid_until, model, source_id, created_at
+      )
+      VALUES ($1, $2, $3, 0.9,
+              NOW() - INTERVAL '20 days', NOW() - INTERVAL '1 day',
+              'test-model', $4, NOW())
+      "#,
+    )
+    .bind(domain)
+    .bind(classification_type)
+    .bind(is_matching_site)
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_current_counts_dedupe_per_domain_and_type() {
+    let (_db, pool) = setup_test_db().await;
+    let source_id =
+      ensure_test_source(&pool, "test", "sha256:metrics-dedupe").await;
+
+    // domain-a: TWO active gaming positive rows (must count as 1 under gaming).
+    insert_current_classification(
+      &pool,
+      "domain-a.com",
+      "gaming",
+      true,
+      source_id,
+    )
+    .await
+    .unwrap();
+    insert_current_classification(
+      &pool,
+      "domain-a.com",
+      "gaming",
+      true,
+      source_id,
+    )
+    .await
+    .unwrap();
+
+    // domain-a: ONE active video-streaming negative row.
+    insert_current_classification(
+      &pool,
+      "domain-a.com",
+      "video-streaming",
+      false,
+      source_id,
+    )
+    .await
+    .unwrap();
+
+    // domain-b: ONE active gaming positive row.
+    insert_current_classification(
+      &pool,
+      "domain-b.com",
+      "gaming",
+      true,
+      source_id,
+    )
+    .await
+    .unwrap();
+
+    // domain-c: an expired gaming row — must not appear in any current_* count.
+    insert_expired_classification(
+      &pool,
+      "domain-c.com",
+      "gaming",
+      true,
+      source_id,
+    )
+    .await
+    .unwrap();
+
+    let stats = get_metrics_stats(&pool).await.unwrap();
+
+    // Grouped — per classification_type, deduped per (type, domain).
+    assert_eq!(
+      stats
+        .current_classifications_by_type
+        .get("gaming")
+        .copied()
+        .unwrap_or(0),
+      2,
+      "gaming: domain-a + domain-b (domain-a's two rows dedupe to 1)"
+    );
+    assert_eq!(
+      stats
+        .current_classifications_by_type
+        .get("video-streaming")
+        .copied()
+        .unwrap_or(0),
+      1
+    );
+
+    assert_eq!(
+      stats
+        .current_positive_by_type
+        .get("gaming")
+        .copied()
+        .unwrap_or(0),
+      2
+    );
+    assert!(
+      !stats
+        .current_positive_by_type
+        .contains_key("video-streaming"),
+      "no positive rows under video-streaming"
+    );
+
+    assert!(
+      !stats.current_negative_by_type.contains_key("gaming"),
+      "no negative rows under gaming"
+    );
+    assert_eq!(
+      stats
+        .current_negative_by_type
+        .get("video-streaming")
+        .copied()
+        .unwrap_or(0),
+      1
+    );
+
+    // Totals — distinct domains across all classification_types.
+    assert_eq!(
+      stats.current_classifications_total, 2,
+      "domain-a counts once despite three rows across two types"
+    );
+    assert_eq!(
+      stats.current_positive_total, 2,
+      "domain-a and domain-b have positive rows"
+    );
+    assert_eq!(
+      stats.current_negative_total, 1,
+      "only domain-a has a negative row"
     );
   }
 
