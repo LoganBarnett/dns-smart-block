@@ -27,7 +27,8 @@ against the live production DB; the index was tested via
 
 ** Database indexes
 
-*** TODO [#A] Add partial index on classified events by created_at
+*** DONE [#A] Add partial index on classified events by created_at
+CLOSED: [2026-05-26 Tue]
 
 *File:* new migration in ~migrations/~
 
@@ -69,7 +70,8 @@ the three because:
 - An ~ORDER BY~ on a non-indexable expression (~CASE WHEN ...~) forces a sort
   even when the data is already in index order.
 
-*** TODO [#A] Rewrite COUNT(DISTINCT domain) as GROUP BY subquery (6 call sites)
+*** DONE [#A] Rewrite COUNT(DISTINCT domain) as GROUP BY subquery (6 call sites)
+CLOSED: [2026-05-26 Tue]
 
 *File:* ~common/src/db/queries.rs~ (six query bodies in ~get_metrics_stats~)
 
