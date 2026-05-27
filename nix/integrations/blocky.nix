@@ -60,8 +60,14 @@ in {
     # Wire the log processor to consume Blocky's journald output and parse only
     # successfully resolved external queries.
     services.dns-smart-block.logProcessor = {
+      # --lines=0 --since now: skip the default 10-line backfill scan
+      # and start the follow cursor at the current time.  Avoids
+      # sd_journal paging in multi-gigabyte amounts of journal data at
+      # service start on long-running hosts (the kernel attributes that
+      # page cache to the unit's cgroup, making the unit appear to
+      # consume vastly more memory than it actually does).
       logSource = lib.mkDefault
-        "cmd:journalctl --follow --unit=blocky.service";
+        "cmd:journalctl --follow --unit=blocky.service --lines=0 --since now";
 
       # Extracts the domain from Blocky's structured log field, stripping the
       # trailing FQDN dot that Blocky always appends.

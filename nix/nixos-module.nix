@@ -143,11 +143,24 @@ in {
 
       logSource = mkOption {
         type = types.str;
-        default = "cmd:journalctl --follow --unit=dns-server.service";
+        default =
+          "cmd:journalctl --follow --unit=dns-server.service "
+          + "--lines=0 --since now";
         description = ''
           Log source to watch.  Can be:
           - A file path: /var/log/dns.log
-          - A command: cmd:journalctl --follow --unit=blocky.service
+          - A command: cmd:journalctl --follow --unit=blocky.service --lines=0 --since now
+
+          The <literal>--lines=0 --since now</literal> tail are recommended
+          when using <literal>journalctl --follow</literal>: without them
+          <literal>sd_journal</literal> bisects backward through every
+          rotated journal file to locate the default 10-line lookback,
+          which on long-running hosts can page in multi-gigabyte amounts
+          of journal data at startup — all of which the kernel then
+          attributes to the unit's cgroup as page cache, making the
+          unit appear to be using vastly more memory than it actually
+          is.  The classifier pipeline has no use for historical lines
+          anyway; only currently-resolving domains are interesting.
         '';
       };
 
