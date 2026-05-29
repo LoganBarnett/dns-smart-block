@@ -247,7 +247,81 @@ the pattern in ~exclude_rule_classify~, ~dns_nxdomain_classify~,
 
 ** Memory leak
 
-*** TODO [#A] log-processor leaks memory at ~150 MB/min until restart
+*** DONE [#A] log-processor leaks memory at ~150 MB/min until restart
+CLOSED: [2026-05-29 Fri]
+
+*Outcome: not a leak.*  Two compounding measurement artifacts produced
+a false signal.  Resolution notes below; original investigation
+content preserved for context.
+
+*What the signal actually was:*
+
+1. *cgroup memory.current includes file-backed page cache.*
+   ~journalctl --follow --unit=blocky.service~ mmap's all of silicon's
+   journal files (4.1 GB total, 88 MB chunks) to scan headers/indexes
+   for matching entries.  The kernel page-caches those reads; cgroup
+   v2 attributes the cached pages to whichever cgroup first touched
+   them.  Result: ~systemctl status~ reports ~Memory: 1.6G~ for the
+   unit while ~/proc/<pid>/status~ shows ~VmRSS: ~7 MB~.  The 1.6 GB
+   is fully reclaimable cache, not actual memory consumption.
+
+2. *The host-wide "drop after deploy" was build-related, not
+   service-related.*  ~proton-deploy~ uses ~--build-host
+   silicon.proton~, so silicon builds its own derivations.  Rust LTO
+   release builds of dns-smart-block briefly push anon memory by
+   ~15-20% during compilation, then release it.  Pulling the
+   Prometheus history with ~promtool query range~ over the past 5
+   days made the pattern unmistakable — every observed "drop" is
+   preceded one ~5-min sample earlier by an equally large *spike*.
+   Example: 2026-05-28 16:10 UTC (the morning observation):
+   pre-deploy 52% → build spike 67% → post-build settle 47%.
+   Baseline between deploys is stable in the 40-55% range; no
+   monotonic creep, no leak.
+
+*Verifying memory health going forward:*
+
+The dashboard's headline expression
+~(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100~
+is the right metric — ~MemAvailable~ is the kernel's own estimate of
+"what could a new allocation get after evicting reclaimable cache"
+and it already discounts the page-cache attribution.  But it's a
+single scalar that hides shape.  Worth adding to the host-monitor
+dashboard alongside the existing percentage:
+
+- *PSI memory pressure* — ~rate(node_pressure_memory_waiting_seconds_total[5m])~.
+  Non-zero only when processes actually stall on memory allocation.
+  This is the empirical "is memory really a problem right now" signal.
+- *Anon vs cache split* — ~node_memory_AnonPages_bytes~ and
+  ~node_memory_Cached_bytes~ separately.  Anon growth without cache
+  growth is a real leak; cache growth without anon growth is just
+  Linux being Linux.
+- *Build-spike isolation* — overlay a "deploy in progress" marker
+  (e.g. a Loki query on deploy logs) so future spike-then-drop events
+  are visibly attributable.
+
+*Improvements that landed anyway:*
+
+- *Graceful SIGTERM/SIGINT handling in log-processor*
+  (commit ba65438 in dns-smart-block).  ~systemctl stop~ now runs the
+  Drop chain instead of dropping any in-flight NATS publish.  Real
+  standalone improvement.
+- *Opt-in dhat heap profiling rig.*  ~services.dns-smart-block.logProcessor.profiling.enable~
+  + ~apply~ transform on the package + ~StateDirectory~ for the JSON
+  + vendored ~dh_view~ viewer.  Default off, no cost when not used.
+  Ready to flip on for a real leak if one ever shows up.
+- *~--lines=0 --since now~ on journalctl invocations.*  Semantically
+  correct (we don't want historical lines anyway), even though it
+  doesn't actually reduce ~sd_journal~'s metadata page-in.  The
+  bigger journal-cache footprint would have to be addressed via
+  retention (~services.journald.extraConfig = "SystemMaxUse=500M";~
+  or similar) or by switching to a file-based log source; neither
+  is worth the scope today given the cache is reclaimable.
+
+────────────────────────────────────────────────────────────────────
+
+*Original task content (preserved for context, including the diagnostic
+plan that ended up driving the dhat-rs feature flag work that landed
+in commit ba65438 even though it wasn't needed for this case):*
 
 *Service:* ~dns-smart-block-log-processor~ (binary in ~log-processor/~).
 
